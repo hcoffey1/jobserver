@@ -6,7 +6,7 @@ use console::style;
 
 use expjobserver::{human_ts, protocol};
 
-use prettytable::{cell, row, Table};
+use prettytable::{row, Table};
 
 use crate::TagInfo;
 
