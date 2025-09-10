@@ -52,6 +52,61 @@ generate_job_id() {
     echo "job_$(date +%s)_$$_$(echo "$*" | md5sum | cut -d' ' -f1 | head -c8)"
 }
 
+# Function to check if a command is a script file
+is_script_file() {
+    local cmd="$1"
+    # Check if it's a path to a file (contains . or /)
+    if [[ "$cmd" == *"/"* ]] || [[ "$cmd" == *"."* ]]; then
+        # Remove any leading ./ 
+        local clean_path="${cmd#./}"
+        # Check if file exists locally
+        if [[ -f "$clean_path" ]]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Function to upload and execute a script file
+upload_and_execute_script() {
+    local machine="$1"
+    local job_id="$2"
+    local script_path="$3"
+    shift 3
+    local script_args="$*"
+    
+    parse_machine "$machine"
+    
+    local ssh_cmd="ssh"
+    if [[ "$MACHINE_PORT" != "22" ]]; then
+        ssh_cmd="$ssh_cmd -p $MACHINE_PORT"
+    fi
+    ssh_cmd="$ssh_cmd $DEFAULT_SSH_OPTIONS $DEFAULT_SSH_USER@$MACHINE_HOST"
+    
+    local remote_job_dir="$DEFAULT_REMOTE_WORKDIR/$job_id"
+    local remote_results_dir="$remote_job_dir/$RESULTS_DIR_NAME"
+    local script_name=$(basename "$script_path")
+    local remote_script_path="$remote_job_dir/$script_name"
+    
+    echo "=== Uploading and executing script: $script_path ===" >&2
+    
+    # Create remote working directory and results directory
+    $ssh_cmd "mkdir -p '$remote_results_dir'"
+    
+    # Upload the script file
+    local scp_cmd="scp"
+    if [[ "$MACHINE_PORT" != "22" ]]; then
+        scp_cmd="$scp_cmd -P $MACHINE_PORT"
+    fi
+    scp_cmd="$scp_cmd $DEFAULT_SSH_OPTIONS"
+    
+    echo "Uploading script $script_path to $remote_script_path" >&2
+    $scp_cmd "$script_path" "$DEFAULT_SSH_USER@$MACHINE_HOST:$remote_script_path"
+    
+    # Make script executable and run it
+    $ssh_cmd "chmod +x '$remote_script_path' && cd '$remote_job_dir' && '$remote_script_path' $script_args"
+}
+
 # Function to execute command on remote machine
 execute_remote_command() {
     local machine="$1"
@@ -157,8 +212,18 @@ main() {
     echo "Command: $command" >&2
     echo "======================================" >&2
     
-    # Execute the command on remote machine
-    execute_remote_command "$machine" "$job_id" $command
+    # Parse the command to check if first argument is a script file
+    local first_arg=$(echo "$command" | awk '{print $1}')
+    local remaining_args=$(echo "$command" | cut -d' ' -f2- 2>/dev/null || echo "")
+    
+    # Check if the first argument is a script file
+    if is_script_file "$first_arg"; then
+        echo "Detected script file: $first_arg" >&2
+        upload_and_execute_script "$machine" "$job_id" "$first_arg" $remaining_args
+    else
+        echo "Executing command directly" >&2
+        execute_remote_command "$machine" "$job_id" $command
+    fi
 }
 
 # Handle help flag
