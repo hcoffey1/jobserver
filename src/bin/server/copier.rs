@@ -302,6 +302,18 @@ fn start_copy(
     // HACK: assume all machine names are in the form HOSTNAME:PORT.
     let machine_ip = machine.split(":").next().unwrap();
 
+    // Get SSH user from environment variable, default to current user
+    let ssh_user = std::env::var("EXPJOBSERVER_SSH_USER")
+        .unwrap_or_else(|_| {
+            std::env::var("USER")
+                .or_else(|_| std::env::var("USERNAME"))
+                .unwrap_or_else(|_| "root".to_string())
+        });
+
+    // Get SSH options from environment variable, with sensible defaults
+    // let ssh_options = std::env::var("EXPJOBSERVER_SSH_OPTIONS")
+    //     .unwrap_or_else(|_| "-o StrictHostKeyChecking=yes".to_string());
+
     let log = std::fs::OpenOptions::new()
         .truncate(false)
         .create(true)
@@ -315,10 +327,10 @@ fn start_copy(
     // report it properly to the user.
     let mut cmd = Command::new("rsync");
     let cmd = cmd
-        .arg("-vvzP")
+        .arg("-avvzP")
         .args(&["-e", "ssh -o StrictHostKeyChecking=yes"])
         .arg(&format!("--timeout={}", RSYNC_IO_TIMEOUT))
-        .arg(&format!("{}:{}*", machine_ip, from))
+        .arg(&format!("{}@{}:{}*", ssh_user, machine_ip, from))
         .arg(&to)
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
