@@ -8,14 +8,23 @@ set -euo pipefail
 
 usage() {
     cat << EOF
-Usage: $0 <machine> <class> <script> [-d <deploy_dir>]
+Usage: $0 <machine> <class> <script> [OPTIONS]
+
+Arguments:
+  machine              Machine identifier (used for SSH connection)
+  class                Machine class to assign
+  script               Local script to upload and execute on remote machine
 
 Options:
   -d, --deploy <dir>   Path to local deployment directory to copy to remote
+  -r, --reinstall      Delete existing remote base directory before setup
+  -v, --verbose        Include .git directories in rsync (default: excluded)
   -h, --help           Show this help
 
-Example:
+Examples:
   $0 cloudlab.us foo ./templates/setup_env.sh -d ./deploy_dir
+  $0 cloudlab.us foo ./setup.sh --reinstall --verbose
+  $0 machine:2222 compute ./configure.sh -d ./app -r
 EOF
 }
 
@@ -29,6 +38,8 @@ CLASS="$2"
 SCRIPT="$3"
 shift 3
 DEPLOY=""
+REINSTALL=false
+VERBOSE=false
 
 # Parse optional arguments
 while [[ $# -gt 0 ]]; do
@@ -36,6 +47,14 @@ while [[ $# -gt 0 ]]; do
         -d|--deploy)
             DEPLOY="$2"
             shift 2
+            ;;
+        -r|--reinstall)
+            REINSTALL=true
+            shift
+            ;;
+        -v|--verbose)
+            VERBOSE=true
+            shift
             ;;
         -h|--help)
             usage
@@ -62,7 +81,17 @@ else
 fi
 
 SSH_CMD="ssh $DEFAULT_SSH_OPTIONS"
-RSYNC_CMD="rsync -avz"
+
+# Setup rsync command with .git exclusion by default
+RSYNC_EXCLUDES=""
+if [[ "$VERBOSE" != "true" ]]; then
+    RSYNC_EXCLUDES="--exclude=.git --exclude=.gitignore"
+    echo "[INFO] Excluding .git directories from rsync (use --verbose to include)"
+else
+    echo "[INFO] Including .git directories in rsync (verbose mode)"
+fi
+
+RSYNC_CMD="rsync -ahz --info=progress2 $RSYNC_EXCLUDES"
 if [[ "$MACHINE_PORT" != "22" ]]; then
     SSH_CMD="$SSH_CMD -p $MACHINE_PORT"
     RSYNC_CMD="$RSYNC_CMD -e 'ssh $DEFAULT_SSH_OPTIONS -p $MACHINE_PORT'"
@@ -72,10 +101,16 @@ fi
 REMOTE="$DEFAULT_SSH_USER@$MACHINE_HOST"
 
 # Prepare remote paths
-REMOTE_BASE="/tmp/add_machine_$$"
+REMOTE_BASE="/tmp/add_machine"
 REMOTE_SCRIPT="$REMOTE_BASE/$(basename "$SCRIPT")"
 REMOTE_DEPLOY="$REMOTE_BASE/deploy"
 REMOTE_LOG="$REMOTE_BASE/setup.log"
+
+# Handle reinstall option
+if [[ "$REINSTALL" == "true" ]]; then
+    echo "[INFO] Reinstall mode: Removing existing remote base directory"
+    $SSH_CMD $REMOTE "rm -rf '$REMOTE_BASE'"
+fi
 
 echo "[INFO] Creating remote base directory: $REMOTE_BASE"
 $SSH_CMD $REMOTE "mkdir -p '$REMOTE_BASE'"
