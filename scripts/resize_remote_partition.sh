@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -xeuo pipefail
+set -euo pipefail
 
 # Bash Implementation of LibSCAIL "resize_root_partition".
 # This resizes the root partition to fill all available space.

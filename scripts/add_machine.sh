@@ -145,81 +145,80 @@ if [[ "$RESIZE_PARTITION" == "true" ]]; then
         # Wait for machine to reboot and come back online
         echo "[INFO] Waiting for machine to reboot and come back online..."
         sleep 30  # Initial wait for reboot to start
-    }
     
-    
-    # Wait for SSH to be available again
-    MAX_WAIT=300  # 5 minutes max wait
-    WAIT_COUNT=0
-    while [[ $WAIT_COUNT -lt $MAX_WAIT ]]; do
-        if $SSH_CMD $REMOTE "echo 'Machine is back online'" 2>/dev/null; then
-            echo "[INFO] Machine is back online after $((WAIT_COUNT)) seconds"
-            break
+        # Wait for SSH to be available again
+        MAX_WAIT=300  # 5 minutes max wait
+        WAIT_COUNT=0
+        while [[ $WAIT_COUNT -lt $MAX_WAIT ]]; do
+            if $SSH_CMD $REMOTE "echo 'Machine is back online'" 2>/dev/null; then
+                echo "[INFO] Machine is back online after $((WAIT_COUNT)) seconds"
+                break
+            fi
+            echo "[INFO] Waiting for machine to come back online... ($((WAIT_COUNT))s)"
+            sleep 10
+            WAIT_COUNT=$((WAIT_COUNT + 10))
+        done
+        
+        if [[ $WAIT_COUNT -ge $MAX_WAIT ]]; then
+            echo "[ERROR] Machine did not come back online within $MAX_WAIT seconds"
+            exit 1
         fi
-        echo "[INFO] Waiting for machine to come back online... ($((WAIT_COUNT))s)"
-        sleep 10
-        WAIT_COUNT=$((WAIT_COUNT + 10))
-    done
-    
-    if [[ $WAIT_COUNT -ge $MAX_WAIT ]]; then
-        echo "[ERROR] Machine did not come back online within $MAX_WAIT seconds"
-        exit 1
-    fi
-    
-    # Verify partition resize and handle filesystem resize
-    echo "[INFO] Verifying partition resize and performing filesystem resize"
-    $SSH_CMD $REMOTE "
-        echo '=== Post-reboot partition and filesystem resize ==='
-        echo 'Current partition table:'
-        sudo fdisk -l 2>/dev/null | grep -A 20 'Disk /dev/sd' | head -30
-        echo
-        echo 'Current filesystem size:'
-        df -h /
-        echo
         
-        # Find root partition and detect filesystem type
-        root_part=\$(lsblk -P -o NAME,MOUNTPOINT | grep 'MOUNTPOINT=\"/\"' | sed 's/.*NAME=\"\([^\"]*\)\".*/\1/')
-        fstype=\$(lsblk -f /dev/\"\$root_part\" -o FSTYPE --noheadings | tr -d ' ')
-        
-        echo \"Root partition: \$root_part\"
-        echo \"Filesystem type: \$fstype\"
-        echo
-        
-        # Resize filesystem based on type
-        case \"\$fstype\" in
-            ext2|ext3|ext4)
-                echo 'Performing ext filesystem resize...'
-                # Check filesystem first
-                sudo e2fsck -f /dev/\"\$root_part\" || {
-                    echo 'Warning: filesystem check had issues, continuing with resize...'
-                }
-                # Resize filesystem
-                sudo resize2fs /dev/\"\$root_part\" || {
-                    echo 'Error: resize2fs failed'
+        # Verify partition resize and handle filesystem resize
+        echo "[INFO] Verifying partition resize and performing filesystem resize"
+        $SSH_CMD $REMOTE "
+            echo '=== Post-reboot partition and filesystem resize ==='
+            echo 'Current partition table:'
+            sudo fdisk -l 2>/dev/null | grep -A 20 'Disk /dev/sd' | head -30
+            echo
+            echo 'Current filesystem size:'
+            df -h /
+            echo
+            
+            # Find root partition and detect filesystem type
+            root_part=\$(lsblk -P -o NAME,MOUNTPOINT | grep 'MOUNTPOINT=\"/\"' | sed 's/.*NAME=\"\([^\"]*\)\".*/\1/')
+            fstype=\$(lsblk -f /dev/\"\$root_part\" -o FSTYPE --noheadings | tr -d ' ')
+            
+            echo \"Root partition: \$root_part\"
+            echo \"Filesystem type: \$fstype\"
+            echo
+            
+            # Resize filesystem based on type
+            case \"\$fstype\" in
+                ext2|ext3|ext4)
+                    echo 'Performing ext filesystem resize...'
+                    # Check filesystem first
+                    sudo e2fsck -f /dev/\"\$root_part\" || {
+                        echo 'Warning: filesystem check had issues, continuing with resize...'
+                    }
+                    # Resize filesystem
+                    sudo resize2fs /dev/\"\$root_part\" || {
+                        echo 'Error: resize2fs failed'
+                        exit 1
+                    }
+                    ;;
+                xfs)
+                    echo 'Performing XFS online resize...'
+                    sudo xfs_growfs / || {
+                        echo 'Error: XFS resize failed'
+                        exit 1
+                    }
+                    ;;
+                *)
+                    echo \"Warning: Unknown filesystem type '\$fstype', cannot resize\"
                     exit 1
-                }
-                ;;
-            xfs)
-                echo 'Performing XFS online resize...'
-                sudo xfs_growfs / || {
-                    echo 'Error: XFS resize failed'
-                    exit 1
-                }
-                ;;
-            *)
-                echo \"Warning: Unknown filesystem type '\$fstype', cannot resize\"
-                exit 1
-                ;;
-        esac
+                    ;;
+            esac
+            
+            echo
+            echo '=== Final filesystem size after resize ==='
+            df -h /
+            echo
+            echo '=== Partition and filesystem resize complete ==='
+        "
         
-        echo
-        echo '=== Final filesystem size after resize ==='
-        df -h /
-        echo
-        echo '=== Partition and filesystem resize complete ==='
-    "
-    
-    echo "[INFO] Partition and filesystem resize completed successfully"
+        echo "[INFO] Partition and filesystem resize completed successfully"
+    }
 fi
 
 # Copy script
