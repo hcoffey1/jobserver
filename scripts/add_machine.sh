@@ -6,6 +6,27 @@
 
 set -euo pipefail
 
+# Wait for remote machine to reboot and come back online
+wait_for_reboot() {
+    local SSH_CMD="$1"
+    local REMOTE="$2"
+    local MAX_WAIT=300  # 5 minutes max wait
+    local WAIT_COUNT=0
+    echo "[INFO] Waiting for machine to reboot and come back online..."
+    sleep 15  # Initial wait for reboot to start
+    while [[ $WAIT_COUNT -lt $MAX_WAIT ]]; do
+        if $SSH_CMD $REMOTE "echo 'Machine is back online'" 2>/dev/null; then
+            echo "[INFO] Machine is back online after $((WAIT_COUNT)) seconds"
+            return 0
+        fi
+        echo "[INFO] Waiting for machine to come back online... ($((WAIT_COUNT))s)"
+        sleep 10
+        WAIT_COUNT=$((WAIT_COUNT + 10))
+    done
+    echo "[ERROR] Machine did not come back online within $MAX_WAIT seconds"
+    return 1
+}
+
 usage() {
     cat << EOF
 Usage: $0 <machine> <class> <script> [OPTIONS]
@@ -142,27 +163,7 @@ if [[ "$RESIZE_PARTITION" == "true" ]]; then
     echo "[INFO] Executing resize script on remote machine (this will reboot the machine)"
     $SSH_CMD $REMOTE "chmod +x '$REMOTE_RESIZE_SCRIPT' && '$REMOTE_RESIZE_SCRIPT'" || {
         echo "[INFO] SSH connection lost - this is expected as the machine reboots"
-        # Wait for machine to reboot and come back online
-        echo "[INFO] Waiting for machine to reboot and come back online..."
-        sleep 30  # Initial wait for reboot to start
-    
-        # Wait for SSH to be available again
-        MAX_WAIT=300  # 5 minutes max wait
-        WAIT_COUNT=0
-        while [[ $WAIT_COUNT -lt $MAX_WAIT ]]; do
-            if $SSH_CMD $REMOTE "echo 'Machine is back online'" 2>/dev/null; then
-                echo "[INFO] Machine is back online after $((WAIT_COUNT)) seconds"
-                break
-            fi
-            echo "[INFO] Waiting for machine to come back online... ($((WAIT_COUNT))s)"
-            sleep 10
-            WAIT_COUNT=$((WAIT_COUNT + 10))
-        done
-        
-        if [[ $WAIT_COUNT -ge $MAX_WAIT ]]; then
-            echo "[ERROR] Machine did not come back online within $MAX_WAIT seconds"
-            exit 1
-        fi
+        wait_for_reboot "$SSH_CMD" "$REMOTE" || exit 1
         
         # Verify partition resize and handle filesystem resize
         echo "[INFO] Verifying partition resize and performing filesystem resize"
@@ -231,9 +232,13 @@ if [[ -n "$DEPLOY" && -d "$DEPLOY" ]]; then
     eval $RSYNC_CMD "$DEPLOY/" "$REMOTE:$REMOTE_DEPLOY/"
 fi
 
-# Run the setup script and log output
+# Run the setup script and log output, TODO: this may restart machine, wait for it to come back
+
 echo "[INFO] Running setup script on remote and logging to $REMOTE_LOG"
-$SSH_CMD $REMOTE "chmod +x '$REMOTE_SCRIPT' && cd '$REMOTE_BASE' && '$REMOTE_SCRIPT' > '$REMOTE_LOG' 2>&1"
+$SSH_CMD $REMOTE "chmod +x '$REMOTE_SCRIPT' && cd '$REMOTE_BASE' && '$REMOTE_SCRIPT' > '$REMOTE_LOG' 2>&1" || {
+    echo "[INFO] SSH connection lost - this may be due to a reboot from the setup script"
+    wait_for_reboot "$SSH_CMD" "$REMOTE" || exit 1
+}
 
 # Copy log file back for debugging
 LOCAL_LOG="./logs/deploy-$(date +%Y%m%d-%H%M%S)-$(basename "$MACHINE_HOST").log"
