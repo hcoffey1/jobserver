@@ -248,6 +248,6 @@ eval $RSYNC_CMD "$REMOTE:$REMOTE_LOG" "$LOCAL_LOG"
 
 # Add machine to jobserver
 echo "[INFO] Adding machine to jobserver: j machine add $MACHINE $CLASS"
-#j machine add "$MACHINE" "$CLASS"
+j machine add "$MACHINE" "$CLASS"
 
 echo "[INFO] Setup complete. Log saved to $LOCAL_LOG"
