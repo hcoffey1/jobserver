@@ -16,4 +16,4 @@ echo "Changing into tiering_solutions"
 cd tiering_solutions
 
 # Will reboot the machine
-sudo ./scripts/setup.sh
+#sudo ./scripts/setup.sh

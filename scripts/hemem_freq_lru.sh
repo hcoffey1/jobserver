@@ -16,25 +16,28 @@ graph500_peak=$((35888160*1024))
 
 # Workload definitions: name, -b, -w, peak variable
 workloads=(
-	"merci merci merci_peak"
-	"liblinear liblinear liblinear_peak"
-	"gapbs pr_spmv gapbs_pr_spmv_peak"
 	"gapbs pr gapbs_pr_peak"
-	"flexkvs flexkvs flexkvs_peak"
 	"gapbs bc gapbs_bc_peak"
-	"gapbs bfs gapbs_bfs_peak"
-	"gapbs cc gapbs_cc_peak"
-	"gapbs cc_sv gapbs_cc_sv_peak"
-	"gapbs sssp gapbs_sssp_peak"
-	"graph500 graph500 graph500_peak"
+	#"merci merci merci_peak"
+	#"graph500 graph500 graph500_peak"
+
+	#"liblinear liblinear liblinear_peak"
+	#"gapbs pr_spmv gapbs_pr_spmv_peak"
+	#"flexkvs flexkvs flexkvs_peak"
+	#"gapbs bfs gapbs_bfs_peak"
+	#"gapbs cc gapbs_cc_peak"
+	#"gapbs cc_sv gapbs_cc_sv_peak"
+	#"gapbs sssp gapbs_sssp_peak"
 )
 
 
 	#"gapbs gapbs_tc gapbs_tc_peak"
 
 MIN_INTERPOSE_MEM_SIZE=$((67108864/(2*1024)))
-DRAM_SIZES=(0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1)
-HEMEM_POL=(/users/hjcoffey/tiering_solutions/src/libhemem.so /users/hjcoffey/tiering_solutions/src/libhemem-lru.so /users/hjcoffey/tiering_solutions/src/libhemem-baseline.so)
+#DRAM_SIZES=(0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1)
+DRAM_SIZES=(0.2 0.4 0.6 0.8 1)
+HEMEM_POL=(/users/hjcoffey/arms/src/libhemem.so /users/hjcoffey/tiering_solutions/src/libhemem-lru.so /users/hjcoffey/tiering_solutions/src/libhemem-baseline.so)
+#HEMEM_POL=(/users/hjcoffey/tiering_solutions/src/libhemem.so /users/hjcoffey/tiering_solutions/src/libhemem-lru.so /users/hjcoffey/tiering_solutions/src/libhemem-baseline.so)
 #HEMEM_POL=(/users/hjcoffey/tiering_solutions/src/libhemem-lru.so /users/hjcoffey/tiering_solutions/src/libhemem-baseline.so)
 
 # Dispatch jobs for each workload, dram size, and policy
@@ -48,7 +51,7 @@ for entry in "${workloads[@]}"; do
 		for pol in "${HEMEM_POL[@]}"; do
 			MEM_USED=$(echo "$peak_val * $size / 1" | bc)
 			# Use env command to properly set environment variables
-			j job add foo "{MACHINE} env MIN_INTERPOSE_MEM_SIZE=$MIN_INTERPOSE_MEM_SIZE HEMEMPOL=$pol DRAMSIZE=$MEM_USED ~/workloads/run.sh -b $base -w $work -o results/freq_lru -r 5" ./hemem_lru
+			j job add foo "{MACHINE} env MIN_INTERPOSE_MEM_SIZE=$MIN_INTERPOSE_MEM_SIZE HEMEMPOL=$pol DRAMSIZE=$MEM_USED ~/workloads/run.sh -b $base -w $work -o results/freq_lru -r 3" ./hemem_arms_bwmon_policies
 		done
 	done
 done

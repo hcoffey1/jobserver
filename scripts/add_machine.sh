@@ -10,20 +10,23 @@ set -euo pipefail
 wait_for_reboot() {
     local SSH_CMD="$1"
     local REMOTE="$2"
-    local MAX_WAIT=300  # 5 minutes max wait
+    local MAX_WAIT="${3:-600}"  # 10 minutes max wait by default
     local WAIT_COUNT=0
     echo "[INFO] Waiting for machine to reboot and come back online..."
-    sleep 15  # Initial wait for reboot to start
+    sleep 30  # Initial wait for reboot to start
     while [[ $WAIT_COUNT -lt $MAX_WAIT ]]; do
-        if $SSH_CMD $REMOTE "echo 'Machine is back online'" 2>/dev/null; then
-            echo "[INFO] Machine is back online after $((WAIT_COUNT)) seconds"
+        # Use ConnectTimeout and a short command to test SSH readiness
+        if $SSH_CMD -o ConnectTimeout=5 $REMOTE "echo 'Machine is back online'" 2>/dev/null; then
+            echo "[INFO] Machine is back online after $((WAIT_COUNT + 30)) seconds"
+            # Give sshd and systemd services a moment to fully stabilize
+            sleep 5
             return 0
         fi
-        echo "[INFO] Waiting for machine to come back online... ($((WAIT_COUNT))s)"
-        sleep 10
-        WAIT_COUNT=$((WAIT_COUNT + 10))
+        echo "[INFO] Waiting for machine to come back online... ($((WAIT_COUNT + 30))s)"
+        sleep 15
+        WAIT_COUNT=$((WAIT_COUNT + 15))
     done
-    echo "[ERROR] Machine did not come back online within $MAX_WAIT seconds"
+    echo "[ERROR] Machine did not come back online within $((MAX_WAIT + 30)) seconds"
     return 1
 }
 
@@ -159,66 +162,35 @@ if [[ "$RESIZE_PARTITION" == "true" ]]; then
     echo "[INFO] Copying resize script to remote machine"
     eval $RSYNC_CMD "$RESIZE_SCRIPT" "$REMOTE:$REMOTE_RESIZE_SCRIPT"
     
-    # Execute resize script (this will reboot the machine)
-    echo "[INFO] Executing resize script on remote machine (this will reboot the machine)"
+    # Execute resize script (this will reboot the machine if needed)
+    echo "[INFO] Executing resize script on remote machine (may reboot the machine)"
     $SSH_CMD $REMOTE "chmod +x '$REMOTE_RESIZE_SCRIPT' && '$REMOTE_RESIZE_SCRIPT'" || {
         echo "[INFO] SSH connection lost - this is expected as the machine reboots"
         wait_for_reboot "$SSH_CMD" "$REMOTE" || exit 1
-        
-        # Verify partition resize and handle filesystem resize
-        echo "[INFO] Verifying partition resize and performing filesystem resize"
-        $SSH_CMD $REMOTE "
-            echo '=== Post-reboot partition and filesystem resize ==='
-            echo 'Current partition table:'
-            sudo fdisk -l 2>/dev/null | grep -A 20 'Disk /dev/sd' | head -30
-            echo
-            echo 'Current filesystem size:'
-            df -h /
-            echo
-            
-            # Find root partition and detect filesystem type
-            root_part=\$(lsblk -P -o NAME,MOUNTPOINT | grep 'MOUNTPOINT=\"/\"' | sed 's/.*NAME=\"\([^\"]*\)\".*/\1/')
-            fstype=\$(lsblk -f /dev/\"\$root_part\" -o FSTYPE --noheadings | tr -d ' ')
-            
-            echo \"Root partition: \$root_part\"
-            echo \"Filesystem type: \$fstype\"
-            echo
-            
-            # Resize filesystem based on type
-            case \"\$fstype\" in
-                ext2|ext3|ext4)
-                    echo 'Performing ext filesystem resize...'
-                    # Check filesystem first
-                    sudo e2fsck -f /dev/\"\$root_part\" || {
-                        echo 'Warning: filesystem check had issues, continuing with resize...'
-                    }
-                    # Resize filesystem
-                    sudo resize2fs /dev/\"\$root_part\" || {
-                        echo 'Error: resize2fs failed'
-                        exit 1
-                    }
-                    ;;
-                xfs)
-                    echo 'Performing XFS online resize...'
-                    sudo xfs_growfs / || {
-                        echo 'Error: XFS resize failed'
-                        exit 1
-                    }
-                    ;;
-                *)
-                    echo \"Warning: Unknown filesystem type '\$fstype', cannot resize\"
-                    exit 1
-                    ;;
-            esac
-            
-            echo
-            echo '=== Final filesystem size after resize ==='
-            df -h /
-            echo
-            echo '=== Partition and filesystem resize complete ==='
-        "
-        
-        echo "[INFO] Partition and filesystem resize completed successfully"
+
+        # The resize script installs a post-boot systemd service that handles
+        # filesystem growth and swapfile setup. Wait for it to finish by
+        # polling for the marker file it creates on completion.
+        echo "[INFO] Waiting for post-boot resize service to complete..."
+        RESIZE_WAIT=0
+        RESIZE_MAX=300  # 5 minutes
+        while [[ $RESIZE_WAIT -lt $RESIZE_MAX ]]; do
+            if $SSH_CMD $REMOTE "test -f /var/lib/rootfs-resizer/done" 2>/dev/null; then
+                echo "[INFO] Post-boot resize service completed successfully"
+                break
+            fi
+            echo "[INFO] Resize service still running... ($((RESIZE_WAIT))s)"
+            sleep 10
+            RESIZE_WAIT=$((RESIZE_WAIT + 10))
+        done
+
+        if [[ $RESIZE_WAIT -ge $RESIZE_MAX ]]; then
+            echo "[WARN] Timed out waiting for resize service, checking status..."
+        fi
+
+        # Show final state
+        $SSH_CMD $REMOTE "echo '=== Final filesystem size ===' && df -h / && echo && lsblk"
+        echo "[INFO] Partition resize completed"
     }
 fi
 
@@ -232,13 +204,44 @@ if [[ -n "$DEPLOY" && -d "$DEPLOY" ]]; then
     eval $RSYNC_CMD "$DEPLOY/" "$REMOTE:$REMOTE_DEPLOY/"
 fi
 
-# Run the setup script and log output, TODO: this may restart machine, wait for it to come back
+# Run the setup script in a tmux session so it persists if the local terminal disconnects.
+# The script logs to $REMOTE_LOG; we can follow progress or detach safely.
 
-echo "[INFO] Running setup script on remote and logging to $REMOTE_LOG"
-$SSH_CMD $REMOTE "chmod +x '$REMOTE_SCRIPT' && cd '$REMOTE_BASE' && '$REMOTE_SCRIPT' > '$REMOTE_LOG' 2>&1" || {
-    echo "[INFO] SSH connection lost - this may be due to a reboot from the setup script"
-    wait_for_reboot "$SSH_CMD" "$REMOTE" || exit 1
-}
+TMUX_SESSION="add_machine_setup"
+
+echo "[INFO] Launching setup script in tmux session '$TMUX_SESSION' on remote (logging to $REMOTE_LOG)"
+$SSH_CMD $REMOTE "chmod +x '$REMOTE_SCRIPT' && \
+    tmux kill-session -t '$TMUX_SESSION' 2>/dev/null || true && \
+    tmux new-session -d -s '$TMUX_SESSION' \
+        \"cd '$REMOTE_BASE' && '$REMOTE_SCRIPT' > '$REMOTE_LOG' 2>&1; echo SETUP_DONE >> '$REMOTE_LOG'\""
+
+echo "[INFO] Setup script is running in tmux session '$TMUX_SESSION' on the remote machine."
+echo "[INFO] You can safely close this terminal. To check progress:"
+echo "         ssh $REMOTE 'tmux attach -t $TMUX_SESSION'     # attach to the session"
+echo "         ssh $REMOTE 'tail -f $REMOTE_LOG'              # follow the log"
+echo ""
+echo "[INFO] Waiting for setup script to finish (polling log for completion)..."
+
+SETUP_WAIT=0
+SETUP_MAX=7200  # 2 hours max
+while [[ $SETUP_WAIT -lt $SETUP_MAX ]]; do
+    # Check if tmux session is still alive
+    if ! $SSH_CMD $REMOTE "tmux has-session -t '$TMUX_SESSION' 2>/dev/null"; then
+        echo "[INFO] Setup script finished (tmux session ended) after $((SETUP_WAIT))s"
+        break
+    fi
+    # Print a status line every 60 seconds
+    if (( SETUP_WAIT % 60 == 0 && SETUP_WAIT > 0 )); then
+        echo "[INFO] Setup still running... ($((SETUP_WAIT / 60))m elapsed)"
+    fi
+    sleep 15
+    SETUP_WAIT=$((SETUP_WAIT + 15))
+done
+
+if [[ $SETUP_WAIT -ge $SETUP_MAX ]]; then
+    echo "[WARN] Setup script still running after $((SETUP_MAX / 60))m. It will continue in the tmux session."
+    echo "[WARN] Check progress with: ssh $REMOTE 'tmux attach -t $TMUX_SESSION'"
+fi
 
 # Copy log file back for debugging
 LOCAL_LOG="./logs/deploy-$(date +%Y%m%d-%H%M%S)-$(basename "$MACHINE_HOST").log"
