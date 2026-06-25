@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Architecture — expjobserver</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+    </script>
+    <style>
+      .seam { stroke-dasharray: 4 4; }
+      .token { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .deep { background: linear-gradient(135deg, #0f172a, #1e293b); }
+    </style>
+  </head>
+  <body class="bg-stone-50 text-slate-900 font-sans">
+    <main class="max-w-5xl mx-auto px-6 py-12 space-y-14">
+
+      <!-- ─────────────────────────── Header ─────────────────────────── -->
+      <header class="space-y-4">
+        <p class="text-xs uppercase tracking-widest text-slate-500">Architecture report</p>
+        <h1 class="text-4xl font-serif font-semibold">expjobserver</h1>
+        <p class="text-lg text-slate-600 max-w-3xl">
+          A small cluster manager: it schedules experiment commands onto a pool of
+          reserved test machines over SSH and copies their results back. Two Rust
+          binaries (<span class="token">expjobserver</span>, <span class="token">j</span>)
+          plus one shell <em>runner</em> wrapper.
+        </p>
+        <div class="flex flex-wrap gap-x-6 gap-y-2 text-sm text-slate-500 pt-2 border-t border-slate-200">
+          <span>Generated 2026-06-25</span>
+          <span>·</span>
+          <span>Rust 2018 · clap 2 · prost/protobuf · log4rs</span>
+          <span>·</span>
+          <span>~6.5k LOC in <span class="token">src/</span></span>
+        </div>
+        <div class="flex flex-wrap gap-3 pt-2 text-xs">
+          <span class="px-2 py-1 rounded bg-slate-900 text-white">solid box = component</span>
+          <span class="px-2 py-1 rounded border border-slate-400">dashed = process / SSH seam</span>
+          <span class="px-2 py-1 rounded bg-red-50 text-red-700 border border-red-200">red = gotcha</span>
+          <span class="px-2 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">emerald = the happy path</span>
+        </div>
+      </header>
+
+      <!-- ─────────────────────────── At a glance ─────────────────────── -->
+      <section class="space-y-6">
+        <h2 class="text-2xl font-serif font-semibold">The three pieces</h2>
+        <div class="grid md:grid-cols-3 gap-4">
+          <article class="rounded-lg border border-slate-200 bg-white p-5 space-y-2">
+            <h3 class="font-semibold">expjobserver <span class="text-xs text-slate-400">(server)</span></h3>
+            <p class="text-sm text-slate-600">Always-on. Holds the machine pool, the job queue, and a per-job
+              state machine. Drives jobs forward on a background work thread, then rsyncs results back.</p>
+            <p class="token text-xs text-slate-500">src/bin/server/</p>
+          </article>
+          <article class="rounded-lg border border-slate-200 bg-white p-5 space-y-2">
+            <h3 class="font-semibold">j <span class="text-xs text-slate-400">(client)</span></h3>
+            <p class="text-sm text-slate-600">Stateless CLI. Each invocation builds one protobuf request, sends it
+              over TCP to <span class="token">127.0.0.1:3030</span>, prints the reply.</p>
+            <p class="token text-xs text-slate-500">src/bin/client/</p>
+          </article>
+          <article class="rounded-lg border-2 border-slate-900 bg-white p-5 space-y-2">
+            <h3 class="font-semibold">remote wrapper <span class="text-xs text-slate-400">(RUNNER)</span></h3>
+            <p class="text-sm text-slate-600">The deep module of this fork. The server execs it per job; it reads the
+              first command token as the host and SSHes in to run the rest. Swapping this swaps <em>where</em> jobs run.</p>
+            <p class="token text-xs text-slate-500">expjobserver_remote_wrapper.sh</p>
+          </article>
+        </div>
+      </section>
+
+      <!-- ─────────────────────────── Job flow ────────────────────────── -->
+      <section class="space-y-6">
+        <h2 class="text-2xl font-serif font-semibold">How a job flows</h2>
+        <p class="text-slate-600 max-w-3xl">From <span class="token">j job add</span> to results on disk. The client
+          never touches the machine — everything goes through the server and its runner.</p>
+        <div class="rounded-lg border border-slate-200 bg-white p-4">
+          <pre class="mermaid">
+sequenceDiagram
+    autonumber
+    participant J as j (client)
+    participant S as expjobserver
+    participant W as work thread / SM
+    participant R as RUNNER (wrapper)
+    participant M as remote machine
+    participant C as copier
+    J->>S: AddJobRequest{class, cmd, cp_results}  (protobuf/TCP)
+    S-->>J: JobIdResp{jid}
+    Note over S,W: job sits Waiting until a machine in its class is free
+    W->>W: substitute {VAR} and {MACHINE}
+    W->>R: RUNNER --print_results_path {MACHINE} cmd args...
+    R->>M: ssh host  (scp the script first if it is local)
+    M-->>R: stdout, incl. "RESULTS: <path>"
+    R-->>W: exit 0 + captured stdout
+    W->>C: hand off <path> for copy
+    C->>M: rsync results -> cp_results dir
+    C-->>S: Done (with results)
+          </pre>
+        </div>
+        <div class="rounded-md bg-emerald-50 border border-emerald-200 p-4 text-sm text-emerald-900">
+          <strong>The happy path in one line:</strong> a job is a command string scheduled to a <em>class</em>;
+          the server fills in <span class="token">{VAR}</span>/<span class="token">{MACHINE}</span>, runs it on a free
+          machine via SSH, and copies back whatever the job announces with <span class="token">RESULTS:</span>.
+        </div>
+      </section>
+
+      <!-- ─────────────────────────── Lifecycle ───────────────────────── -->
+      <section class="space-y-6">
+        <h2 class="text-2xl font-serif font-semibold">Job lifecycle (the state machine)</h2>
+        <p class="text-slate-600 max-w-3xl">Every job and setup task is one big state machine in
+          <span class="token">src/bin/server/main.rs</span> (<span class="token">TaskState</span>), advanced by
+          <span class="token">sm.rs</span>. The work thread re-drives every non-terminal task each tick.</p>
+        <div class="rounded-lg border border-slate-200 bg-white p-4">
+          <pre class="mermaid">
+stateDiagram-v2
+    [*] --> Waiting
+    Waiting --> Held: j job hold
+    Held --> Waiting: j job unhold
+    Waiting --> Running: free machine in class
+    Running --> CheckingResults: exit 0
+    Running --> Error: non-zero exit / timeout
+    CheckingResults --> CopyingResults: RESULTS line found
+    CheckingResults --> Finalize: no results
+    CopyingResults --> Finalize
+    Finalize --> Done
+    Finalize --> DoneWithResults
+    Error --> ErrorDone
+    ErrorDone --> Waiting: repeat_on_fail → clone
+    ErrorDone --> [*]: failures exhausted
+    Waiting --> Canceled: j job cancel
+    Running --> Canceled
+    Canceled --> Killed
+    Done --> [*]
+    DoneWithResults --> [*]
+    Killed --> [*]
+          </pre>
+        </div>
+        <p class="text-sm text-slate-500">Setup tasks share this machine; on success they additionally register
+          their machine into a class. Repeated failures of a machine move it out of its class
+          (<span class="token">MachineStatus.failures</span>).</p>
+      </section>
+
+      <!-- ─────────────────────────── Command anatomy ─────────────────── -->
+      <section class="space-y-6">
+        <h2 class="text-2xl font-serif font-semibold">Anatomy of a job command</h2>
+        <p class="text-slate-600 max-w-3xl">The single most important thing to understand about this fork. A real
+          line from <span class="token">scripts/hemem_baseline.sh</span>:</p>
+
+        <div class="rounded-lg border border-slate-200 bg-white p-5 space-y-5">
+          <!-- the j job add line, tokenised -->
+          <div class="flex flex-wrap items-stretch gap-2 text-sm">
+            <div class="px-3 py-2 rounded bg-slate-100 token">j job add</div>
+            <div class="px-3 py-2 rounded bg-indigo-100 token">foo
+              <div class="text-[10px] uppercase tracking-wider text-indigo-500">class</div></div>
+            <div class="px-3 py-2 rounded bg-amber-100 token flex-1 min-w-[18rem]">"{MACHINE} ~/workloads/run.sh -b graph500 -o results/baseline -r 3"
+              <div class="text-[10px] uppercase tracking-wider text-amber-600">command string (one quoted arg)</div></div>
+            <div class="px-3 py-2 rounded bg-emerald-100 token">./hemem_baseline_bwmon
+              <div class="text-[10px] uppercase tracking-wider text-emerald-600">results dir</div></div>
+          </div>
+
+          <!-- arrow down -->
+          <div class="flex justify-center text-slate-400">▼ server substitutes &amp; tokenises, then execs the runner ▼</div>
+
+          <!-- decomposition of the command string -->
+          <div class="flex flex-wrap items-stretch gap-2 text-sm">
+            <div class="px-3 py-2 rounded border-2 border-slate-900 token">{MACHINE}
+              <div class="text-[10px] uppercase tracking-wider text-slate-500">→ host, consumed by wrapper</div></div>
+            <div class="px-3 py-2 rounded border border-slate-300 token flex-1 min-w-[16rem]">~/workloads/run.sh -b graph500 -o results/baseline -r 3
+              <div class="text-[10px] uppercase tracking-wider text-slate-500">→ run on the remote over SSH</div></div>
+          </div>
+        </div>
+
+        <div class="grid md:grid-cols-2 gap-4">
+          <div class="rounded-md bg-red-50 border border-red-200 p-4 text-sm text-red-900 space-y-1">
+            <p class="font-semibold">Gotcha 1 — <span class="token">{MACHINE}</span> must come first.</p>
+            <p>The server passes only command tokens to the runner; the wrapper treats token&nbsp;#1 as the SSH host.
+              Forget it and the wrapper tries to SSH to <span class="token">~/workloads/run.sh</span>.</p>
+          </div>
+          <div class="rounded-md bg-red-50 border border-red-200 p-4 text-sm text-red-900 space-y-1">
+            <p class="font-semibold">Gotcha 2 — no shell operators.</p>
+            <p>The command is <span class="token">split_whitespace()</span>'d and replayed as <span class="token">"$@"</span>.
+              <span class="token">&amp;&amp;</span>, <span class="token">|</span>, <span class="token">&gt;</span>,
+              <span class="token">;</span> are literal args. Put multi-step logic inside the invoked script.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ─────────────────────────── Variables ───────────────────────── -->
+      <section class="space-y-6">
+        <h2 class="text-2xl font-serif font-semibold">Variables, matrices, and "env"</h2>
+        <div class="grid md:grid-cols-3 gap-4 text-sm">
+          <article class="rounded-lg border border-slate-200 bg-white p-5 space-y-2">
+            <h3 class="font-semibold">Variables <span class="token text-xs text-slate-400">{VAR}</span></h3>
+            <p class="text-slate-600">Server-side text substitution into the command, set with
+              <span class="token">j var set</span>. Resolved before SSH — <em>not</em> a remote env var.</p>
+          </article>
+          <article class="rounded-lg border border-slate-200 bg-white p-5 space-y-2">
+            <h3 class="font-semibold">Matrix</h3>
+            <p class="text-slate-600">Cartesian product over variable lists generates many jobs from one template.
+              <span class="token">BENCH=a,b INTERVAL=1,2</span> → 4 jobs. Dump results with
+              <span class="token">j job matrix csv</span>.</p>
+          </article>
+          <article class="rounded-lg border border-slate-200 bg-white p-5 space-y-2">
+            <h3 class="font-semibold">Real env vars</h3>
+            <p class="text-slate-600">None natively. Bake them into the command:
+              <span class="token">"{MACHINE} FOO=bar run.sh"</span>.</p>
+          </article>
+        </div>
+      </section>
+
+      <!-- ─────────────────────────── Provisioning ────────────────────── -->
+      <section class="space-y-6">
+        <h2 class="text-2xl font-serif font-semibold">Provisioning a machine (a separate path)</h2>
+        <p class="text-slate-600 max-w-3xl"><span class="token">scripts/add_machine.sh</span> prepares a freshly
+          reserved CloudLab host and registers it. It runs over plain SSH/rsync and does <em>not</em> go through the job
+          server or the runner wrapper — only the final step touches <span class="token">j</span>.</p>
+        <div class="rounded-lg border border-slate-200 bg-white p-4">
+          <pre class="mermaid">
+flowchart TD
+    A[reserve host] --> B{-p resize?}
+    B -- yes --> C[upload + run resize_remote_partition.sh<br/>reboot, wait for reconnect]
+    B -- no --> D
+    C --> D[rsync deploy dir to /deploy/add_machine/deploy]
+    D --> E[run setup script in remote tmux session<br/>survives local disconnect, logs to ./logs/]
+    E --> F[poll until tmux session ends]
+    F --> G[j machine add host class]
+    G --> H[machine joins the class, ready for jobs]
+    classDef reg fill:#d1fae5,stroke:#059669;
+    class G,H reg
+          </pre>
+        </div>
+      </section>
+
+      <!-- ─────────────────────────── Source map ──────────────────────── -->
+      <section class="space-y-6">
+        <h2 class="text-2xl font-serif font-semibold">Source map</h2>
+        <div class="grid md:grid-cols-2 gap-4 text-sm">
+          <div class="rounded-lg border border-slate-200 bg-white p-5 space-y-2">
+            <p class="text-xs uppercase tracking-wider text-slate-500">Server · src/bin/server/</p>
+            <ul class="space-y-1">
+              <li><span class="token">main.rs</span> — entry; <span class="token">Server</span>, <span class="token">Task</span>/<span class="token">TaskState</span>, work thread</li>
+              <li><span class="token">sm.rs</span> — state machine; spawns the runner</li>
+              <li><span class="token">request.rs</span> — one handler per client request</li>
+              <li><span class="token">copier.rs</span> — rsync results back</li>
+              <li><span class="token">snapshot.rs</span> + <span class="token">state.proto</span> — persist/restore state</li>
+              <li><span class="token">notify.rs</span> — Slack notifications</li>
+            </ul>
+          </div>
+          <div class="rounded-lg border border-slate-200 bg-white p-5 space-y-2">
+            <p class="text-xs uppercase tracking-wider text-slate-500">Client · src/bin/client/ &amp; shared</p>
+            <ul class="space-y-1">
+              <li><span class="token">cli.rs</span> — clap command tree</li>
+              <li><span class="token">main.rs</span> — build requests, send, dispatch</li>
+              <li><span class="token">pretty.rs</span> / <span class="token">stat.rs</span> — table output</li>
+              <li><span class="token">../../lib.rs</span> — <span class="token">{VAR}</span>/<span class="token">{MACHINE}</span> subst, cartesian product, ts helpers</li>
+              <li><span class="token">../../protocol.proto</span> — RPC messages (built by <span class="token">build.rs</span>)</li>
+              <li><span class="token">expjobserver_remote_wrapper.sh</span> — the RUNNER</li>
+            </ul>
+          </div>
+        </div>
+        <p class="text-sm text-slate-500">Config seam: the wrapper sources <span class="token">example_config.sh</span>
+          (tracked defaults) then <span class="token">config.local.sh</span> (gitignored real values), resolved
+          relative to the wrapper so the server's working directory doesn't matter.</p>
+      </section>
+
+      <footer class="pt-8 border-t border-slate-200 text-sm text-slate-500">
+        Companion docs: <span class="token">README.md</span> (addendum: how this fork is used) ·
+        <span class="token">CONTEXT.md</span> (glossary) · <span class="token">CLAUDE.md</span> (working notes).
+      </footer>
+    </main>
+  </body>
+</html>

@@ -5,7 +5,12 @@
 #
 # Usage: This script is passed as the RUNNER argument to expjobserver
 # Example: expjobserver ./expjobserver_remote_wrapper.sh /path/to/logs/ /path/to/log.yml
-source example_config.sh
+
+# Load default config (tracked) then local overrides (gitignored), resolved
+# relative to this script so it works regardless of the server's working dir.
+_WRAPPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$_WRAPPER_DIR/example_config.sh"
+[ -f "$_WRAPPER_DIR/config.local.sh" ] && source "$_WRAPPER_DIR/config.local.sh"
 
 set -euo pipefail
 

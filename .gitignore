@@ -5,3 +5,15 @@ logs/
 *.swo
 
 log4rs.yaml
+
+# Experiment result data — kept on disk, never committed.
+old_runs/
+hemem_arms_bwmon_policies/
+
+# Local wrapper overrides (real SSH usernames/hosts). Sourced after the
+# tracked example_config.sh, so values here win. See README addendum.
+config.local.sh
+
+# Stray debug dumps.
+debug.txt
+debug_log.txt

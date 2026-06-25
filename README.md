@@ -219,3 +219,141 @@ Moreover, you can dump a CSV of the matrix and any results paths using `j job ma
 
 Take a look at the `--help` message for the various commands and subcommand to
 learn about even more goodies.
+
+---
+
+# Addendum: how *this* fork is actually used (remote SSH wrapper)
+
+The upstream README above describes the generic server. This fork drives it with
+a **remote SSH wrapper** so that jobs run on freshly-reserved CloudLab machines.
+This section documents the real, day-to-day workflow. For domain vocabulary see
+[`CONTEXT.md`](./CONTEXT.md); for an illustrated architecture walkthrough open
+[`docs/architecture.html`](./docs/architecture.html) in a browser.
+
+## The mental model
+
+A **job is a single command string** scheduled onto any free machine in a
+**class**. You schedule it with:
+
+```sh
+j job add <CLASS> "{MACHINE} <command> <args...>" [RESULTS_DIR]
+```
+
+What happens to that string:
+
+1. The server substitutes `{VAR}` (server-side variables) and `{MACHINE}` (the
+   host it picked) into the command.
+2. It runs `RUNNER --print_results_path <command tokens...>`, where `RUNNER` is
+   [`expjobserver_remote_wrapper.sh`](./expjobserver_remote_wrapper.sh).
+3. The wrapper takes the **first token as the target host** (that is why every
+   command begins with `{MACHINE}`), SSHes in, and runs the rest.
+4. If the job prints a line `RESULTS: <path>` to stdout, the server rsyncs that
+   path back into `RESULTS_DIR`.
+
+So your "bash script + command-line arguments" model is exactly right. Two ways
+to supply the script:
+
+- **A script already on the machine** (e.g. `~/workloads/run.sh`) — run directly
+  over SSH. This is what `scripts/hemem_baseline.sh` and `scripts/run_pebs.sh`
+  do.
+- **A local script file** — if the first token after `{MACHINE}` is a path that
+  exists *locally*, the wrapper `scp`s it up and runs it with your args.
+
+Real example (from `scripts/hemem_baseline.sh`):
+
+```sh
+j job add foo "{MACHINE} ~/workloads/run.sh -b graph500 -w graph500 -o results/baseline -r 3" ./hemem_baseline_bwmon
+```
+
+## "Env variables" = template variables, not OS env
+
+The system has no concept of exported shell environment variables for a job.
+Its only notion of "variables" is **`{VAR}` template substitution into the
+command string**, resolved on the server before SSH:
+
+- `j var set TOKEN abc123` → every `{TOKEN}` in future commands becomes `abc123`
+  (handy for keeping secrets out of bash history).
+- **Job matrices** sweep the cartesian product of variable lists:
+
+  ```sh
+  j job matrix add foo "{MACHINE} ~/workloads/run.sh -b {BENCH} -i {INTERVAL}" \
+      ./results BENCH=graph500,flexkvs INTERVAL=1000,2000
+  ```
+
+  This enqueues 2×2 = 4 jobs. Inspect with `j job matrix stat <id>` and dump a
+  CSV of results paths with `j job matrix csv <id>`.
+
+If you need a *real* environment variable on the remote, bake it into the
+command: `"{MACHINE} FOO=bar ~/workloads/run.sh ..."`.
+
+## Important constraint: one command, no shell operators
+
+The server splits the command on whitespace and the wrapper replays the tokens
+as `"$@"` on the remote. **Shell operators (`&&`, `||`, `|`, `>`, `;`) do not
+work inside a job command** — they are passed as literal arguments. Each job is
+a single program invocation. For multi-step logic, put it inside the script you
+invoke (`run.sh`) and call that.
+
+## Result collection
+
+A job's results are copied back only if its stdout contains a line:
+
+```
+RESULTS: /absolute/or/relative/path/on/remote
+```
+
+The wrapper also auto-detects files written into a `results/` subdirectory of
+its per-job working dir (`$EXPJOBSERVER_REMOTE_WORKDIR/<job_id>/results`) and
+emits the `RESULTS:` line for you. The server then rsyncs that path into the
+`RESULTS_DIR` you passed to `j job add`.
+
+## Configuration
+
+The wrapper sources two files (resolved relative to the wrapper, so the server's
+working directory doesn't matter):
+
+- [`example_config.sh`](./example_config.sh) — **tracked** defaults. Every value
+  uses `${VAR:-default}`, so your shell exports win.
+- `config.local.sh` — **gitignored** local overrides (real SSH username/hosts).
+  Sourced after the defaults, so it wins. Create your own; an example:
+
+  ```sh
+  export EXPJOBSERVER_SSH_USER="hjcoffey"
+  ```
+
+Recognised variables: `EXPJOBSERVER_SSH_USER`, `EXPJOBSERVER_SSH_OPTIONS`,
+`EXPJOBSERVER_REMOTE_WORKDIR`.
+
+## Adding & provisioning a machine
+
+`scripts/add_machine.sh` provisions a freshly-reserved machine end-to-end:
+optionally resize the root partition (reboots and waits for reconnect), rsync a
+deploy directory, run a setup script in a remote `tmux` session (survives local
+disconnects, logs to `./logs/`), then register it with `j machine add`.
+
+```sh
+export EXPJOBSERVER_SSH_USER="hjcoffey"
+./scripts/add_machine.sh c220g5-120111.wisc.cloudlab.us foo ./scripts/setup_hemem.sh \
+    -d ~/school/grad/research/memregion/deploy -p -v -r
+#   <host>                            <class> <setup script>     -p resize  -v keep .git  -r reinstall
+```
+
+Note: this script provisions the machine and registers it; it does **not** use
+the SSH wrapper (that's only for `j job` execution). The two paths are separate.
+
+## End-to-end quick start
+
+```sh
+# 1. Start the server with the remote wrapper as the RUNNER (first run needs --allow_snap_fail).
+expjobserver ./expjobserver_remote_wrapper.sh ./logs/ ./example.log.yml --allow_snap_fail
+
+# 2. Provision + register a machine into class "foo".
+./scripts/add_machine.sh <host> foo ./scripts/setup_hemem.sh -d <deploy_dir> -p -v -r
+
+# 3. Schedule jobs onto the class (note the leading {MACHINE}).
+bash scripts/hemem_baseline.sh        # a batch of `j job add foo "{MACHINE} ..."` lines
+
+# 4. Watch them.
+j job ls
+j job log -t <jid>     # tail a running job's stdout
+```
