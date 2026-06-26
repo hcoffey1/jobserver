@@ -68,3 +68,16 @@ _Avoid_: pause, suspend.
 **Snapshot**:
 The server's full state serialized to disk (protobuf) so it survives restarts.
 _Avoid_: dump, backup, checkpoint.
+
+**Deploy directory**:
+The local source tree (e.g. `.../deploy/working/`) holding the `regent` and
+`workloads` repos that `add_machine.sh` rsyncs onto a Machine during setup. The
+authoritative copy of experiment code that lives off the server.
+_Avoid_: workspace, repo root.
+
+**Distribute**:
+Propagating updated `regent`/`workloads` source from the Deploy directory to
+already-registered Machines, out-of-band of the Job pipeline — distinct from
+Setup, which provisions a *new* Machine. Pulls the top-level repos, rsyncs to
+each Machine in parallel, and rebuilds where needed.
+_Avoid_: deploy, sync, push (as a bare verb), redeploy.
