@@ -184,10 +184,16 @@ grow_fs_and_swap() {
     exit 1
   fi
 
-  # Configure swapfile
+  # Configure swapfile. Use fallocate when the fs supports it, else fall back
+  # to dd (ext2/3 report "fallocate: Operation not supported").
   if ! grep -qE '^[^#].*\s+/swapfile\s+none\s+swap\s' /etc/fstab; then
     log "Creating swapfile (${SWAPFILE_SIZE}) and enabling it..."
-    fallocate -l "$SWAPFILE_SIZE" /swapfile
+    rm -f /swapfile
+    if ! fallocate -l "$SWAPFILE_SIZE" /swapfile 2>/dev/null; then
+      log "fallocate unsupported on this fs; falling back to dd."
+      swap_mib=$(( $(numfmt --from=iec "$SWAPFILE_SIZE") / 1024 / 1024 ))
+      dd if=/dev/zero of=/swapfile bs=1M count="$swap_mib" status=none
+    fi
     chmod 600 /swapfile
     mkswap /swapfile
     echo "/swapfile none swap sw 0 0" >> /etc/fstab
@@ -246,10 +252,16 @@ else
   exit 1
 fi
 
-# Configure swapfile if missing
+# Configure swapfile if missing. fallocate fails on ext2/3 ("Operation not
+# supported"), so fall back to dd, which works on any filesystem.
 if ! grep -qE '^[^#].*\\s+/swapfile\\s+none\\s+swap\\s' /etc/fstab; then
   log "Creating swapfile (\$SWAPFILE_SIZE) and enabling it..."
-  fallocate -l "\$SWAPFILE_SIZE" /swapfile
+  rm -f /swapfile
+  if ! fallocate -l "\$SWAPFILE_SIZE" /swapfile 2>/dev/null; then
+    log "fallocate unsupported on this fs; falling back to dd."
+    swap_mib=\$(( \$(numfmt --from=iec "\$SWAPFILE_SIZE") / 1024 / 1024 ))
+    dd if=/dev/zero of=/swapfile bs=1M count="\$swap_mib" status=none
+  fi
   chmod 600 /swapfile
   mkswap /swapfile
   echo "/swapfile none swap sw 0 0" >> /etc/fstab
