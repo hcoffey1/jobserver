@@ -341,6 +341,77 @@ export EXPJOBSERVER_SSH_USER="hjcoffey"
 Note: this script provisions the machine and registers it; it does **not** use
 the SSH wrapper (that's only for `j job` execution). The two paths are separate.
 
+## Updating code on registered machines (`distribute_regent.sh`)
+
+Once machines are registered, `scripts/distribute_regent.sh` pushes updated
+`regent`/`workloads` source to all of them. From a local deploy directory laid
+out as `<deploy>/working/{regent,workloads}`, it:
+
+1. `git pull --ff-only` both repos and updates submodules — **except `silo`**,
+   which is patched/built on each machine (a dirty `silo` worktree is fine; any
+   other uncommitted change aborts the run so you notice it).
+2. rsyncs each repo to the live `~/working` tree on every machine, honoring
+   `.gitignore` so only source (not built artifacts) is shipped (see below).
+   Pass `--staging` to *also* mirror into the `/deploy/add_machine/deploy`
+   staging tree (the re-provisioning source); off by default.
+3. rebuilds `regent` on each machine (`make clean && make`), in parallel.
+
+It discovers targets by reading `j machine ls`, and **skips machines currently
+running a job** (use `--force` to include them).
+
+**What gets synced.** The rsyncs use `--filter=':- .gitignore'`, so each
+directory's `.gitignore` — *including the submodules' own* — is honored. Build
+artifacts and generated datasets that the submodules ignore (e.g. `gapbs`'s
+~45 GB of compiled binaries plus `benchmark/graphs/`) are **not** shipped; the
+machine builds/regenerates them itself, the same reason `silo` is excluded.
+There is no `--delete`, so whatever a machine already built stays in place. In
+practice this shrinks a full `workloads` sync from ~78 GB to ~1.2 GB.
+
+```sh
+# Point --deploy at the dir whose working/{regent,workloads} hold the source.
+# EXPJOBSERVER_CLIENT is needed unless `j` is on your PATH (it isn't by default).
+EXPJOBSERVER_CLIENT=./target/debug/j \
+  ./scripts/distribute_regent.sh -d ~
+
+EXPJOBSERVER_CLIENT=./target/debug/j \
+  ./scripts/distribute_regent.sh -d ~ --class regent -j 16   # one class, 16 in parallel
+
+EXPJOBSERVER_CLIENT=./target/debug/j \
+  ./scripts/distribute_regent.sh -d ~ --no-build c220g5-111214.wisc.cloudlab.us
+```
+
+Key options: `--no-build` (skip the rebuild — right for a script-only change),
+`--no-pull` (rsync the working trees as-is, skipping git), `--staging` (also
+mirror into the staging tree — needed only to refresh the re-provisioning
+source), `--class <name>`, `-j <N>` (parallelism), `--force`, and one or more
+`HOST` args to restrict the targets. SSH to the machines must be passwordless (the repo's git remotes also
+need to authenticate — switch them to SSH if they're HTTPS without stored creds).
+Heads-up: a full `regent` rebuild can run tens of minutes; if your SSH access
+relies on a **forwarded** agent, keep the forwarding session alive for the whole
+run or the rebuild step will fail with `Permission denied (publickey)`.
+
+### Checking progress
+
+`distribute_regent.sh` is a plain local script, **not** a job — so it does
+**not** appear in `j job ls`. As it runs it prints the target list up front and a
+timestamped line per host as state changes (`RUN` → `BLD` → `OK`/`FAIL`), then a
+per-host summary table at the end. It also writes durable artifacts under
+`./logs/distribute-<timestamp>/` (the per-host `.log` files carry the live rsync
+transfer progress, since the rsyncs run with `--info=progress2`):
+
+```sh
+# Is a run still in progress?
+pgrep -af distribute_regent            # prints the process if running; empty when done
+
+ld=$(ls -dt logs/distribute-* | head -1)   # most recent run's log dir
+cat "$ld"/*.status                     # per host: "OK<TAB>secs" or "FAILED<TAB>rc<TAB>secs"
+                                       #   (a host's .status file appears only when it finishes)
+tail -f "$ld"/<host>.log               # live progress for one host (rsync, then rebuild output)
+```
+
+A run is done when `pgrep` finds nothing and every targeted host has a `.status`
+file; `FAILED` rows point you at that host's `.log` for the cause.
+
 ## End-to-end quick start
 
 ```sh

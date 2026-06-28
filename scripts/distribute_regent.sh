@@ -25,6 +25,8 @@ Options:
       --force          Include machines currently running a job (default: skip)
       --no-build       Skip the regent 'make clean && make' rebuild
       --no-pull        Skip the git pull / submodule update step (sync as-is)
+      --staging        Also mirror into the /deploy staging tree (default: skip;
+                       only needed to refresh the re-provisioning source)
   -h, --help           Show this help
 
 Positional HOST args restrict distribution to those registered machines.
@@ -50,6 +52,7 @@ JOBS=8
 FORCE=false
 NO_BUILD=false
 NO_PULL=false
+SYNC_STAGING=false
 HOSTS=()
 
 while [[ $# -gt 0 ]]; do
@@ -60,6 +63,7 @@ while [[ $# -gt 0 ]]; do
         --force)       FORCE=true; shift ;;
         --no-build)    NO_BUILD=true; shift ;;
         --no-pull)     NO_PULL=true; shift ;;
+        --staging)     SYNC_STAGING=true; shift ;;
         -h|--help)     usage; exit 0 ;;
         -*)            echo "[ERROR] Unknown option: $1" >&2; usage; exit 1 ;;
         *)             HOSTS+=("$1"); shift ;;
@@ -82,7 +86,10 @@ for d in "$REGENT_SRC" "$WORKLOADS_SRC"; do
 done
 
 SSH_USER="${EXPJOBSERVER_SSH_USER:-$(whoami)}"
-SSH_OPTIONS="${EXPJOBSERVER_SSH_OPTIONS:--o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR}"
+# BatchMode + ConnectTimeout so a host with broken auth or that is unreachable
+# fails fast (and reports FAILED) instead of hanging the whole run on a password
+# prompt or a dead connection.
+SSH_OPTIONS="${EXPJOBSERVER_SSH_OPTIONS:--o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=15}"
 J_BIN="${EXPJOBSERVER_CLIENT:-j}"
 
 # Live copy is home-relative (rsynced into $HOME by setup_hemem.sh); staging is
@@ -95,7 +102,10 @@ prepare_repo() {
     local repo="$1" name="$2"
 
     # Abort on local (tracked) modifications rather than stash/merge/rebase.
-    if ! git -C "$repo" diff-index --quiet HEAD -- 2>/dev/null; then
+    # Ignore dirty submodule worktrees (notably silo, which is patched/built on
+    # the machine and excluded from the pull/rsync below) -- only real tracked
+    # or gitlink changes should block.
+    if ! git -C "$repo" diff-index --quiet --ignore-submodules=dirty HEAD -- 2>/dev/null; then
         echo "[ERROR] $name has uncommitted changes:" >&2
         git -C "$repo" status --short --untracked-files=no >&2
         echo "[ERROR] Commit or stash them, then re-run." >&2
@@ -178,7 +188,20 @@ fi
 
 LOGDIR="./logs/distribute-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$LOGDIR"
-echo "[INFO] Distributing to ${#TARGETS[@]} machine(s); per-host logs in $LOGDIR"
+echo "[INFO] Distributing to ${#TARGETS[@]} machine(s) (parallelism: $JOBS); per-host logs in $LOGDIR"
+echo "[INFO] Targets:"
+for row in "${TARGETS[@]}"; do
+    IFS=$'\t' read -r _addr _class _ <<< "$row"
+    printf '         - %-38s [%s]\n' "$_addr" "$_class"
+done
+
+# One-line, timestamped per-host status update.  Hosts run in parallel, so these
+# interleave; each printf is a single short write so lines stay intact.
+#   RUN  = started (syncing)   BLD = rebuilding regent
+#   OK   = finished cleanly    FAIL = failed (see its log)
+progress() {
+    printf '  %s [%-4s] %-38s %s\n' "$(date +%H:%M:%S)" "$1" "$2" "$3"
+}
 
 process_machine() {
     local addr="$1"
@@ -193,32 +216,61 @@ process_machine() {
 
     local start end rc
     start=$(date +%s)
+    progress "RUN" "$addr" "syncing regent + workloads"
+    # Capture the subshell's exit code without letting the script's `set -e` abort
+    # process_machine first -- otherwise a failed host never writes its .status and
+    # the summary shows NO-STATUS instead of FAILED.
+    rc=0
+    # fd 3 = console: the work subshell sends its output to the log, but uses fd 3
+    # to post the "rebuilding" transition so live progress stays visible.
+    exec 3>&1
     (
         set -e
         echo "=== distribute $host @ $(date) ==="
 
-        # regent -> live (~/working) and staging
-        rsync -ahz --exclude=.git -e "$rsh" "$REGENT_SRC/"    "$remote:working/regent/"
-        rsync -ahz --exclude=.git -e "$rsh" "$REGENT_SRC/"    "$remote:$STAGING/working/regent/"
+        # regent + workloads -> live (~/working).
+        #   --info=progress2  : single overall progress line (percent/rate/ETA) so
+        #                       the per-host log shows live transfer progress.
+        #   --filter=':- .gitignore' : honor every directory's .gitignore, INCLUDING
+        #                       the submodules' own -- so gitignored build artifacts
+        #                       and generated datasets (e.g. gapbs's ~45G of binaries
+        #                       + benchmark/graphs) are NOT shipped.  The machine
+        #                       builds those itself (same model as silo); rsync has
+        #                       no --delete, so whatever a machine already built
+        #                       stays put.  This cuts a workloads sync ~78G -> ~1.2G.
+        # Explicit excludes come before the gitignore filter so .git / silo are
+        # always dropped regardless of any .gitignore re-include rules.
+        echo "--- rsync regent -> live (~/working/regent) ---"
+        rsync -ahz --info=progress2 --mkpath --exclude=.git --filter=':- .gitignore' -e "$rsh" "$REGENT_SRC/" "$remote:working/regent/"
+        echo "--- rsync workloads -> live (~/working/workloads) ---"
+        rsync -ahz --info=progress2 --mkpath --exclude=.git --exclude='/silo' --filter=':- .gitignore' -e "$rsh" "$WORKLOADS_SRC/" "$remote:working/workloads/"
 
-        # workloads -> live and staging, excluding the patched/built silo submodule
-        rsync -ahz --exclude=.git --exclude='/silo' -e "$rsh" "$WORKLOADS_SRC/" "$remote:working/workloads/"
-        rsync -ahz --exclude=.git --exclude='/silo' -e "$rsh" "$WORKLOADS_SRC/" "$remote:$STAGING/working/workloads/"
+        if [[ "$SYNC_STAGING" == "true" ]]; then
+            # Also mirror into the staging tree add_machine.sh seeds (re-provisioning
+            # source).  Off by default -- routine updates only need the live tree.
+            echo "--- rsync regent -> staging ($STAGING/working/regent) ---"
+            rsync -ahz --info=progress2 --mkpath --exclude=.git --filter=':- .gitignore' -e "$rsh" "$REGENT_SRC/" "$remote:$STAGING/working/regent/"
+            echo "--- rsync workloads -> staging ($STAGING/working/workloads) ---"
+            rsync -ahz --info=progress2 --mkpath --exclude=.git --exclude='/silo' --filter=':- .gitignore' -e "$rsh" "$WORKLOADS_SRC/" "$remote:$STAGING/working/workloads/"
+        fi
 
         if [[ "$NO_BUILD" != "true" ]]; then
+            progress "BLD" "$addr" "rebuilding regent (make clean && make)" >&3
             echo "--- rebuilding regent (make clean && make) ---"
             # login shell so the toolchain is on PATH
             $ssh_cmd "$remote" \
                 "bash -lc 'cd working/regent && make clean && make -j\$(nproc)'"
         fi
-    ) >"$log" 2>&1
-    rc=$?
+    ) >"$log" 2>&1 || rc=$?
+    exec 3>&-
     end=$(date +%s)
 
     if [[ $rc -eq 0 ]]; then
         printf 'OK\t%s\n' "$((end - start))" > "$status"
+        progress "OK" "$addr" "done in $((end - start))s"
     else
         printf 'FAILED\t%s\t%s\n' "$rc" "$((end - start))" > "$status"
+        progress "FAIL" "$addr" "rc=$rc after $((end - start))s -- see $log"
     fi
 }
 
