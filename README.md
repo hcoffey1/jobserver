@@ -412,6 +412,46 @@ tail -f "$ld"/<host>.log               # live progress for one host (rsync, then
 A run is done when `pgrep` finds nothing and every targeted host has a `.status`
 file; `FAILED` rows point you at that host's `.log` for the cause.
 
+## Unattended runs: give the head node its own key (`setup_worker_key.sh`)
+
+The server, the SSH wrapper, and the results **copier** all reach the worker
+machines over SSH using whatever identity the ssh-agent offers. If that is your
+**forwarded** agent, the head node's access dies the moment you disconnect — new
+jobs and result copy-back then fail with `Permission denied (publickey)`. The
+tmux server *process* survives a disconnect; only its auth doesn't. So for an
+overnight / unattended run the head node needs a **local key** the workers trust,
+independent of your laptop session.
+
+`scripts/setup_worker_key.sh` sets that up. Run it **once, while your current SSH
+to the workers still works**; it:
+
+1. creates a dedicated `~/.ssh/id_jobserver` keypair (no passphrase, so it works
+   unattended) if one doesn't exist,
+2. `ssh-copy-id`s the public half into each worker's `authorized_keys` using your
+   current/forwarded access, and verifies the new key logs in **without the
+   agent** (the exact disconnected condition), and
+3. writes a managed `Host` block to `~/.ssh/config` so every `ssh`/`scp`/`rsync`
+   to the workers uses that key — which transparently covers both the wrapper and
+   the copier with no code change (the copier hardcodes its `ssh` options and
+   ignores `EXPJOBSERVER_SSH_OPTIONS`, so `~/.ssh/config` is the only knob that
+   reaches it).
+
+```sh
+# all registered machines (read from `j machine ls`):
+EXPJOBSERVER_CLIENT=./target/debug/j ./scripts/setup_worker_key.sh
+
+# or specific hosts:
+./scripts/setup_worker_key.sh c220g5-111214.wisc.cloudlab.us c220g5-120111.wisc.cloudlab.us
+```
+
+It is idempotent (re-running refreshes the one managed `~/.ssh/config` block and
+re-verifies each host). Env overrides: `EXPJOBSERVER_KEY` (key path),
+`EXPJOBSERVER_SSH_USER`, `EXPJOBSERVER_HOST_PATTERN` (the `ssh_config` `Host`
+glob, default `*.cloudlab.us`), `EXPJOBSERVER_CLIENT`. The agent-forwarding setup
+can stay for your own interactive logins — the server simply no longer depends on
+it. **Run this before you disconnect**: the first key install needs your forwarded
+credential; after that the head node is independent.
+
 ## End-to-end quick start
 
 ```sh
