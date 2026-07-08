@@ -22,15 +22,21 @@ cd "$(dirname "$0")/.." || exit 1
 
 # ---- Config (override via environment) -------------------------------------
 MACHINE_LIST="${MACHINE_LIST:-machine_list.txt}"
-CLASS="${CLASS:-foo}"
+CLASS="${CLASS:-regent}"
 SETUP_SCRIPT="${SETUP_SCRIPT:-./scripts/setup_hemem.sh}"
 DEPLOY_DIR="${DEPLOY_DIR:-$HOME/school/grad/research/memregion/deploy}"
-CONCURRENCY="${CONCURRENCY:-4}"
+CONCURRENCY="${CONCURRENCY:-16}"
 LOG_DIR="${LOG_DIR:-./setup_run_logs}"
 
 # add_machine.sh reads EXPJOBSERVER_SSH_USER; default to hjcoffey but respect an
 # already-exported value.
 export EXPJOBSERVER_SSH_USER="${EXPJOBSERVER_SSH_USER:-hjcoffey}"
+
+# add_machine.sh's final `j machine add` uses EXPJOBSERVER_CLIENT to locate the
+# client. The 'j' binary is usually NOT on PATH, so default to the built debug
+# binary; override to point at a release build or an installed 'j'. Without
+# this, registration silently fails and hosts land in SETUP_OK_NO_JOBSERVER.
+export EXPJOBSERVER_CLIENT="${EXPJOBSERVER_CLIENT:-./target/debug/j}"
 
 # Extra flags passed through to add_machine.sh (after the deploy dir).
 ADD_MACHINE_FLAGS=(-d "$DEPLOY_DIR" -p -v -r)
@@ -68,6 +74,7 @@ echo "   concurrency: $CONCURRENCY"
 echo "   ssh user:    $EXPJOBSERVER_SSH_USER"
 echo "   class:       $CLASS"
 echo "   setup:       $SETUP_SCRIPT"
+echo "   client:      $EXPJOBSERVER_CLIENT"
 echo "   deploy dir:  $DEPLOY_DIR"
 echo "   logs:        $LOG_DIR/<host>.log"
 echo "==================================================================="

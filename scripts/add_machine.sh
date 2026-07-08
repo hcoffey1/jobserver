@@ -6,6 +6,10 @@
 
 set -euo pipefail
 
+# Path to the 'j' client. Override with EXPJOBSERVER_CLIENT when 'j' is not on
+# PATH (e.g. point it at ./target/debug/j). Matches setup_worker_key.sh.
+J_BIN="${EXPJOBSERVER_CLIENT:-j}"
+
 # Wait for remote machine to reboot and come back online
 wait_for_reboot() {
     local SSH_CMD="$1"
@@ -250,7 +254,7 @@ echo "[INFO] Copying remote log $REMOTE_LOG to $LOCAL_LOG"
 eval $RSYNC_CMD "$REMOTE:$REMOTE_LOG" "$LOCAL_LOG"
 
 # Add machine to jobserver
-echo "[INFO] Adding machine to jobserver: j machine add $MACHINE $CLASS"
-j machine add "$MACHINE" "$CLASS"
+echo "[INFO] Adding machine to jobserver: $J_BIN machine add $MACHINE $CLASS"
+"$J_BIN" machine add "$MACHINE" "$CLASS"
 
 echo "[INFO] Setup complete. Log saved to $LOCAL_LOG"

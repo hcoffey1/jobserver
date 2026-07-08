@@ -1,0 +1,23 @@
+# >>> expjobserver ssh-agent pin (managed by apply_zshrc_ssh_agent.sh) >>>
+# Pin the FORWARDED ssh-agent socket to a stable path so long-running,
+# detached tmux sessions -- specifically the expjobserver head node -- keep
+# their access to the worker machines after you disconnect and reconnect.
+#
+# When you SSH in with agent forwarding, sshd creates a fresh random socket
+# (/tmp/ssh-XXXX/agent.NNN) on every connection and points $SSH_AUTH_SOCK at
+# it. A tmux session started on an earlier connection still holds the OLD,
+# now-dead path, so the job server loses all worker SSH (jobs + result
+# copy-back fail with `publickey`). Symlinking each new socket to a stable
+# name and exporting that name means the server -- which holds the stable
+# path -- transparently picks up the current agent with no restart.
+#
+# NOTE: once scripts/setup_worker_key.sh has installed the head node's own
+# id_jobserver key, the SERVER no longer depends on this; it then only helps
+# your interactive logins.
+if [[ -n "${SSH_AUTH_SOCK:-}" && "$SSH_AUTH_SOCK" != "$HOME/.ssh/agent.sock" && -S "$SSH_AUTH_SOCK" ]]; then
+    ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/agent.sock"
+fi
+if [[ -S "$HOME/.ssh/agent.sock" ]]; then
+    export SSH_AUTH_SOCK="$HOME/.ssh/agent.sock"
+fi
+# <<< expjobserver ssh-agent pin <<<

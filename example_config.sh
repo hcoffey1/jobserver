@@ -10,8 +10,8 @@
 # create config.local.sh (gitignored) — the wrapper sources it after this file,
 # so it wins. See the README addendum for details.
 
-# SSH user used to reach the test machines (default: your local username).
-export EXPJOBSERVER_SSH_USER="${EXPJOBSERVER_SSH_USER:-your-ssh-user}"
+# SSH user used to reach the test machines (default: hjcoffey).
+export EXPJOBSERVER_SSH_USER="${EXPJOBSERVER_SSH_USER:-hjcoffey}"
 
 # SSH options applied to every connection.
 export EXPJOBSERVER_SSH_OPTIONS="${EXPJOBSERVER_SSH_OPTIONS:--o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=30}"
