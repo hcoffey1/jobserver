@@ -330,6 +330,15 @@ fn start_copy(
         .arg("-avvzP")
         .args(&["-e", "ssh -o StrictHostKeyChecking=yes"])
         .arg(&format!("--timeout={}", RSYNC_IO_TIMEOUT))
+        // Never pull the large per-cell artifacts back to the host: the raw
+        // `*_profiledump.txt` (tens of GB each) and `regent_vis_*.csv`
+        // visualization dumps stay on the worker. Twice these filled the head
+        // node's disk mid-sweep. This is a server-side backstop independent of
+        // the worker-side slim staging in sweep_all.sh (SLIM_RESULTS), so a
+        // stale worker script can't refill the disk. Keepers (stdout/stderr/
+        // *_time.txt/numastat/*.png/cluster_sweep*.csv) are unaffected.
+        .arg("--exclude=*_profiledump.txt")
+        .arg("--exclude=regent_vis_*.csv")
         .arg(&format!("{}@{}:{}*", ssh_user, machine_ip, from))
         .arg(&to)
         .stdout(Stdio::from(log))

@@ -29,8 +29,13 @@
 
 CLASS=regent                                              # matches registered machines
 SWEEP="$HOME/working/regent/scripts/working_scripts/sweep_all.sh"
-RUNS="$HOME/working/sweep_runs"                            # per-workload MASTER_DIR root (remote)
-CP=./sweep_results                                        # local aggregation dir (this machine)
+# RUN_TAG names this campaign.  A FRESH tag => brand-new per-workload MASTER_DIRs
+# that don't exist on any machine yet, so every job starts from scratch wherever
+# the scheduler places it (machine assignment no longer matters) and the previous
+# run's data/results are left untouched.  Bump the tag for each new campaign.
+RUN_TAG="${RUN_TAG:-3iter}"
+RUNS="$HOME/working/sweep_runs_${RUN_TAG}"                 # per-workload MASTER_DIR root (remote, on /dev/sdb via ~/working symlink)
+CP="./sweep_results_${RUN_TAG}"                            # local aggregation dir (this machine)
 J_BIN="${EXPJOBSERVER_CLIENT:-j}"                         # 'j' isn't on PATH by default
 
 # The copier only creates the LEAF dir under $CP -- not its parents.  If $CP is
@@ -39,13 +44,43 @@ J_BIN="${EXPJOBSERVER_CLIENT:-j}"                         # 'j' isn't on PATH by
 # the aggregation root exists first.
 mkdir -p "$CP"
 
-"$J_BIN" job add $CLASS "{MACHINE} env MASTER_DIR=$RUNS/mcf       bash $SWEEP mcf"       $CP
-"$J_BIN" job add $CLASS "{MACHINE} env MASTER_DIR=$RUNS/cactus    bash $SWEEP cactus"    $CP
-"$J_BIN" job add $CLASS "{MACHINE} env MASTER_DIR=$RUNS/bwaves    bash $SWEEP bwaves"    $CP
-"$J_BIN" job add $CLASS "{MACHINE} env MASTER_DIR=$RUNS/deepsjeng bash $SWEEP deepsjeng" $CP
-"$J_BIN" job add $CLASS "{MACHINE} env MASTER_DIR=$RUNS/mg        bash $SWEEP mg"        $CP
-"$J_BIN" job add $CLASS "{MACHINE} env MASTER_DIR=$RUNS/lbm       bash $SWEEP lbm"       $CP
-"$J_BIN" job add $CLASS "{MACHINE} env MASTER_DIR=$RUNS/graph500  bash $SWEEP graph500"  $CP
+add_sweep() {                                             # add_sweep <name>: one job per sweep_all name
+    local w="$1"
+    "$J_BIN" job add $CLASS "{MACHINE} env MASTER_DIR=$RUNS/$w bash $SWEEP $w" "$CP"
+}
+
+# --- Original memory-intensive core (SPEC + npb mg + graph500) ---------------
+for w in mcf cactus bwaves deepsjeng mg lbm graph500; do add_sweep "$w"; done
+
+# --- Expanded catalog (parsed from smoke_results; metrics per ADR-0013) ------
+# Each is scheduled as its own job; comment out a line/loop to skip a workload.
+# gapbs graph kernels (twitter, ~12-23 GB) -- metric: built-in "Average Time"
+for w in gapbs_bc gapbs_bfs gapbs_cc gapbs_cc_sv gapbs_pr gapbs_pr_spmv gapbs_sssp gapbs_tc; do add_sweep "$w"; done
+# NPB-CPP kernels -- dual metric (time + Mop/s).  ft ~80 GB / is ~33 GB: big-footprint,
+# schedule on a DRAM node sized for ~peak (like mg/graph500).
+for w in npb-cpp_cg npb-cpp_is npb-cpp_ft; do add_sweep "$w"; done
+# renaissance JVM benchmarks (~0.7-15 GB) -- metric: per-iteration ms, warmup-skipped
+for w in renaissance_als renaissance_chi-square renaissance_db-shootout renaissance_dec-tree \
+         renaissance_fj-kmeans renaissance_gauss-mix renaissance_log-regression renaissance_movie-lens \
+         renaissance_naive-bayes renaissance_page-rank renaissance_scala-kmeans; do add_sweep "$w"; done
+# more SPEC CPU2017 refrate (sub-1 GB) -- metric: walltime
+for w in spec_xalancbmk spec_fotonik3d spec_roms spec_omnetpp; do add_sweep "$w"; done
+# SPEC CPU2026 (cpuv8) refrate subset (sub-2 GB) -- metric: walltime.  The suite
+# is NOT prebuilt on the workers: the first spec2026 job to land on a machine
+# auto-installs + builds it from the ISO (scripts/workloads/spec2026.sh), so that
+# machine's first job runs ~45 min longer, then later spec2026 jobs reuse it.
+# omnetpp/gcc/zstd are multi-invocation (10/3/8 sub-runs, summed walltime).
+for w in spec2026_lbm spec2026_fotonik3d spec2026_roms spec2026_cactus \
+         spec2026_omnetpp spec2026_gcc spec2026_zstd; do add_sweep "$w"; done
+# singletons.  liblinear ~69 GB / xsbench ~63 GB: big-footprint (see NPB note).
+add_sweep merci
+add_sweep xsbench
+add_sweep ogb_products
+add_sweep micro_interference        # throughput (ops/s), NOT walltime (fixed 60s run)
+add_sweep faiss                     # walltime
+add_sweep silo                      # walltime
+add_sweep liblinear                 # walltime
+add_sweep cloverleaf                # walltime
 
 echo
 echo "Queued sweep jobs. Track with:  j job ls"
