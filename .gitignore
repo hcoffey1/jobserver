@@ -1,5 +1,7 @@
 target/
 logs/
+*results*
+*logs*
 
 *.swp
 *.swo
