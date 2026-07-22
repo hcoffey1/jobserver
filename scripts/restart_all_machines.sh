@@ -66,9 +66,17 @@ echo
 reboot_one() {
     local host="$1"
 
-    # Trigger the reboot. The connection drops as the host goes down, so a
-    # non-zero exit here is normal -- don't treat it as a failure.
-    ssh "${SSH_OPTS[@]}" "$SSH_USER@$host" 'sudo reboot' >/dev/null 2>&1 || true
+    # Record the current boot id first, so we can later confirm the machine
+    # ACTUALLY rebooted. A failed reboot leaves sshd up and would otherwise look
+    # like an instant "return" (false positive).
+    local before
+    before="$(ssh "${SSH_OPTS[@]}" "$SSH_USER@$host" 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null)"
+
+    # Trigger the reboot. Use `sudo -n` so sudo never tries to prompt for a
+    # password over the TTY-less batch ssh -- plain `sudo reboot` silently no-ops
+    # on hosts where that prompt can't be shown. The connection drops as the host
+    # goes down, so a non-zero exit here is normal -- don't treat it as a failure.
+    ssh "${SSH_OPTS[@]}" "$SSH_USER@$host" 'sudo -n reboot' >/dev/null 2>&1 || true
     echo "[SENT ] reboot -> $host"
 
     if [[ "$WAIT_FOR_REBOOT" != "1" ]]; then
@@ -81,14 +89,19 @@ reboot_one() {
 
     local waited=0
     while [[ $waited -lt $REBOOT_WAIT_MAX ]]; do
-        if ssh "${SSH_OPTS[@]}" "$SSH_USER@$host" true >/dev/null 2>&1; then
-            echo "[UP   ] $host (back after ~$((waited + 20))s)"
+        # Reachable AND a NEW boot id => a real reboot completed. Comparing boot
+        # ids (not just "ssh works") is what prevents a false "back online" when
+        # the reboot never actually happened.
+        local after
+        after="$(ssh "${SSH_OPTS[@]}" "$SSH_USER@$host" 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null)"
+        if [[ -n "$after" && "$after" != "$before" ]]; then
+            echo "[UP   ] $host (rebooted, back after ~$((waited + 20))s)"
             return 0
         fi
         sleep 10
         waited=$((waited + 10))
     done
-    echo "[TIMEOUT] $host did not return within $((REBOOT_WAIT_MAX + 20))s" >&2
+    echo "[TIMEOUT] $host did not confirm a fresh boot within $((REBOOT_WAIT_MAX + 20))s" >&2
     return 1
 }
 
