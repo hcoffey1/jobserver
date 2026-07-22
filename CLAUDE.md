@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 Context for working in this repo. Domain vocabulary lives in [`CONTEXT.md`](./CONTEXT.md);
 an illustrated architecture walkthrough is in [`docs/architecture.html`](./docs/architecture.html).
 
@@ -35,6 +37,9 @@ How the user actually uses it is documented in the **README addendum**
 | `src/bin/server/notify.rs` | Slack notifications. |
 | `src/bin/client/{cli,main,pretty,stat}.rs` | CLI definition, request building, output formatting. |
 | `scripts/add_machine.sh` | Provision + register a reserved machine (resize, deploy, tmux setup, `j machine add`). |
+| `scripts/{setup,add}_all_machines.sh` | Batch drivers: provision a fleet from a machine list / register an already-provisioned fleet. |
+| `scripts/setup_worker_key.sh` | Give the head node its own local key to the workers (unattended runs). |
+| `scripts/patches/apply_zshrc_ssh_agent.sh` | Pin the forwarded ssh-agent socket so detached tmux sessions survive reconnects. |
 | `scripts/{hemem_baseline,run_pebs,...}.sh` | Batches of `j job add` lines — the real experiment workloads. |
 
 ## Build & run
@@ -47,6 +52,47 @@ expjobserver ./expjobserver_remote_wrapper.sh ./logs/ ./example.log.yml --allow_
 `--allow_snap_fail` is required on first run (and any time the on-disk snapshot
 should be discarded); otherwise the server refuses to start if it can't load
 history — a deliberate guard against wiping job history.
+
+Neither binary is on `PATH` by default. `cargo build` leaves them at
+`./target/debug/{expjobserver,j}`; either `cargo install --path .` or call them
+by path. **Scripts that shell out to the client need `EXPJOBSERVER_CLIENT=./target/debug/j`**
+(they default to that path, but any invocation from elsewhere must set it).
+
+## First-time setup on a new machine
+
+Bootstrapping the **head/control node** (the machine that runs the long-lived
+server in tmux and drives the CloudLab workers). Do these in order; the README
+addendum has the full rationale for each.
+
+1. **Build.** `cargo build` (see Build & run). Create `config.local.sh` with
+   `export EXPJOBSERVER_SSH_USER="<cloudlab-user>"` — without it the wrapper
+   uses the placeholder user and *every* job fails with exit 255 (`publickey`).
+   `config.local.sh` is gitignored, so it never exists on a fresh checkout.
+2. **Worker SSH access.** The server, wrapper, and results copier all reach
+   workers over SSH via whatever the ssh-agent offers.
+   - For interactive/short work with a **forwarded** agent, pin the socket so a
+     detached tmux server keeps auth across reconnects:
+     `scripts/patches/apply_zshrc_ssh_agent.sh` (idempotent; installs the managed
+     block in `~/.zshrc`). New shell or `source ~/.zshrc` to activate.
+   - **Before any unattended/overnight run**, run `scripts/setup_worker_key.sh`
+     *while your current SSH to the workers still works*. It mints a local
+     `~/.ssh/id_jobserver` key, `ssh-copy-id`s it to each worker, and writes an
+     `~/.ssh/config` block so the head node no longer depends on your forwarded
+     agent. The copier ignores `EXPJOBSERVER_SSH_OPTIONS`, so `~/.ssh/config` is
+     the only knob that fixes its SSH too.
+3. **Start the server** in tmux (survives disconnects):
+   `expjobserver ./expjobserver_remote_wrapper.sh ./logs/ ./example.log.yml --allow_snap_fail`
+   (the flag is required on this very first run).
+4. **Provision + register workers.** One host: `scripts/add_machine.sh <host> <class> <setup.sh> -d <deploy> -p -v -r`.
+   A fleet: list hosts in `machine_list.txt` (bare host, `user@host`, or a copied
+   `ssh user@host` line all parse), then `scripts/setup_all_machines.sh` to
+   provision and `scripts/add_all_machines.sh` to register them with the running
+   server. `setup_all_machines.sh`'s final `j machine add` step fails when no
+   server is up yet — it reports that as `SETUP_OK_NO_JOBSERVER`, not a failure.
+5. **Enqueue jobs** with the workload batch scripts (`bash scripts/hemem_baseline.sh`, etc.).
+
+`setup_worker_key.sh`, `apply_zshrc_ssh_agent.sh`, and `restart_all_machines.sh`
+are all idempotent — safe to re-run.
 
 ## Conventions & gotchas
 
