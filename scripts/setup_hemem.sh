@@ -47,8 +47,14 @@ if ! dpkg -s msr-tools >/dev/null 2>&1 \
 fi
 echo "=== msr-tools verified (wrmsr present) on $(hostname -s) ==="
 
-# Create
-rsync -azh --info=progress2 /deploy/add_machine/deploy/ $HOME
+# Unpack the deploy into ~/working, NOT $HOME.  The deploy root shipped by
+# add_machine.sh IS ~/working (regent + workloads), so it must land one level
+# down or every remote path breaks: jobs reference ~/working/regent and
+# $HOME/working/workloads, and the `pushd working/workloads` below expects it.
+# mount_scratch.sh (above) has already made ~/working a symlink onto the 1 TB
+# scratch disk, so this writes through to /dev/sdb rather than filling root.
+mkdir -p "$HOME/working"
+rsync -azh --info=progress2 /deploy/add_machine/deploy/ "$HOME/working/"
 
 # Ensure a working base conda + dataVis env via the cluster's single source of
 # truth (the deployed miniconda ships without pip/archspec, which breaks EVERY

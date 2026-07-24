@@ -126,6 +126,18 @@ else
     echo "[INFO] Including .git directories in rsync (verbose mode)"
 fi
 
+# Extra excludes for the deploy rsync, space-separated and applied verbatim.
+# Use this to skip bulk data the remote setup script regenerates itself (e.g.
+# gapbs bench-graphs, liblinear's kdd12) -- shipping those costs ~100 G per
+# host for files `workloads/setup.sh` rebuilds or re-downloads anyway.
+# Paths are relative to the deploy root; anchor with a leading '/'.
+if [[ -n "${EXPJOBSERVER_RSYNC_EXCLUDES:-}" ]]; then
+    for _ex in ${EXPJOBSERVER_RSYNC_EXCLUDES}; do
+        RSYNC_EXCLUDES="$RSYNC_EXCLUDES --exclude=$_ex"
+    done
+    echo "[INFO] Extra rsync excludes: ${EXPJOBSERVER_RSYNC_EXCLUDES}"
+fi
+
 RSYNC_CMD="rsync -ahz --info=progress2 $RSYNC_EXCLUDES"
 if [[ "$MACHINE_PORT" != "22" ]]; then
     SSH_CMD="$SSH_CMD -p $MACHINE_PORT"

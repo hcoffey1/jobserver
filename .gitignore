@@ -19,3 +19,5 @@ config.local.sh
 # Stray debug dumps.
 debug.txt
 debug_log.txt
+
+machine_list.txt
