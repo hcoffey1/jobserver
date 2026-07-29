@@ -23,14 +23,20 @@
 # own interactive logins; the server no longer depends on it.)
 #
 # Usage:  setup_worker_key.sh [HOST ...]
-#   no args : target every machine reported by `j machine ls`
+#   no args : target the hosts in $MACHINE_LIST if that file exists, else every
+#             machine reported by `j machine ls`
 #   HOST... : target only those hosts
+#
+# The machine-list fallback matters because this script is normally run BEFORE
+# the server is up (that is the whole point -- get the head node its own key
+# first), so `j machine ls` has nothing to report yet.
 #
 # Env overrides:
 #   EXPJOBSERVER_KEY           key path           (default ~/.ssh/id_jobserver)
 #   EXPJOBSERVER_SSH_USER      ssh user           (default $(whoami))
 #   EXPJOBSERVER_HOST_PATTERN  ssh_config Host glob(default *.cloudlab.us)
 #   EXPJOBSERVER_CLIENT        path to 'j'        (default j)
+#   MACHINE_LIST               host list file     (default machine_list.txt)
 # =============================================================================
 set -euo pipefail
 
@@ -39,6 +45,8 @@ SSH_USER="${EXPJOBSERVER_SSH_USER:-$(whoami)}"
 J_BIN="${EXPJOBSERVER_CLIENT:-j}"
 HOST_PATTERN="${EXPJOBSERVER_HOST_PATTERN:-*.cloudlab.us}"
 SSH_CONFIG="$HOME/.ssh/config"
+# Resolved relative to the repo root, like the other scripts' default.
+MACHINE_LIST="${MACHINE_LIST:-$(cd "$(dirname "$0")/.." && pwd)/machine_list.txt}"
 
 # --- 1. Local keypair --------------------------------------------------------
 if [[ -f "$KEY" ]]; then
@@ -50,22 +58,50 @@ fi
 
 # --- 2. Target hosts ---------------------------------------------------------
 HOSTS=("$@")
+if [[ ${#HOSTS[@]} -eq 0 && -f "$MACHINE_LIST" ]]; then
+    echo "[INFO] No hosts given; reading $MACHINE_LIST"
+    # Same parse as setup_all_machines.sh: drop comments, take the first field
+    # that looks like a host ('@' or '.'), strip any user@ prefix.
+    mapfile -t HOSTS < <(
+        sed -E 's/#.*$//' "$MACHINE_LIST" \
+            | awk '{ for (i=1;i<=NF;i++) if ($i ~ /@|\./) { print $i; break } }' \
+            | sed -E 's/^.*@//' \
+            | sed -E '/^[[:space:]]*$/d'
+    )
+fi
 if [[ ${#HOSTS[@]} -eq 0 ]]; then
-    echo "[INFO] No hosts given; reading registered machines from '$J_BIN machine ls'"
-    # Same parse as distribute_regent.sh: strip ANSI, take the first column of
-    # data rows that look like a hostname, drop any :port.
+    echo "[INFO] Falling back to registered machines from '$J_BIN machine ls'"
+    # Strip ANSI, skip the title row, take the first column, drop any :port.
+    # NOTE: do NOT require a '.' in the hostname -- on a LAN-addressed fleet the
+    # machines are registered as bare names like 'node1' and a dot-filter drops
+    # every one of them.
     mapfile -t HOSTS < <(
         "$J_BIN" machine ls 2>/dev/null \
             | sed -E 's/\x1b\[[0-9;]*m//g' \
-            | awk 'NR>1 && $1 ~ /\./ {print $1}' \
+            | awk 'NR>1 && $1 != "" && $1 !~ /^-+$/ {print $1}' \
             | sed 's/:.*//' \
             | sort -u
     )
 fi
 if [[ ${#HOSTS[@]} -eq 0 ]]; then
-    echo "[ERROR] No target hosts (pass HOSTs, or start the server so 'j machine ls' works)." >&2
+    echo "[ERROR] No target hosts. Pass HOSTs, create $MACHINE_LIST" >&2
+    echo "        (scripts/gen_machine_list.sh), or start the server so 'j machine ls' works." >&2
     exit 1
 fi
+
+# The managed ssh_config block is keyed on a Host glob. If it does not match the
+# hosts we just installed the key on, the block is inert: ssh/scp/rsync keep
+# using the (forwarded, soon-dead) agent and the overnight run still breaks --
+# silently, since every step here would still report success.
+for h in "${HOSTS[@]}"; do
+    # shellcheck disable=SC2053  # intentional glob match, not a string compare
+    if [[ "$h" != $HOST_PATTERN ]]; then
+        echo "[WARN] Host '$h' does NOT match EXPJOBSERVER_HOST_PATTERN '$HOST_PATTERN';" >&2
+        echo "       the ~/.ssh/config block below will not apply to it." >&2
+        echo "       For bare LAN names, re-run with EXPJOBSERVER_HOST_PATTERN='node*'." >&2
+        break
+    fi
+done
 echo "[INFO] Installing key on ${#HOSTS[@]} host(s): ${HOSTS[*]}"
 
 # --- 3. Install pubkey using your current (forwarded) access -----------------

@@ -50,6 +50,24 @@ if [[ ! -d "$DEPLOY_DIR" ]]; then
     echo "[ERROR] Deploy dir not found: $DEPLOY_DIR" >&2
     exit 1
 fi
+# The deploy root must hold regent/ + workloads/ at its TOP level, because
+# setup_hemem.sh unpacks it into the worker's ~/working/ -- so the remote layout
+# comes out as ~/working/{regent,workloads}, what every job command assumes.
+# A deploy dir with its own working/ layer (the common shape elsewhere, e.g.
+# <deploy>/working/{regent,workloads}) nests to ~/working/working/ instead; the
+# workloads build then dies in a `set +e` block and the host still reports OK.
+# Cheap to check here, hours to notice later.
+for _need in regent workloads; do
+    if [[ ! -d "$DEPLOY_DIR/$_need" ]]; then
+        echo "[ERROR] Deploy dir has no '$_need/' at its top level: $DEPLOY_DIR" >&2
+        echo "        Expected $DEPLOY_DIR/{regent,workloads}. Found:" >&2
+        ls -1 "$DEPLOY_DIR" 2>/dev/null | sed 's/^/          /' >&2
+        if [[ -d "$DEPLOY_DIR/working/$_need" ]]; then
+            echo "        Looks like the root is one level up -- try DEPLOY_DIR=$DEPLOY_DIR/working" >&2
+        fi
+        exit 1
+    fi
+done
 
 mkdir -p "$LOG_DIR"
 

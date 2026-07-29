@@ -56,6 +56,27 @@ echo "=== msr-tools verified (wrmsr present) on $(hostname -s) ==="
 mkdir -p "$HOME/working"
 rsync -azh --info=progress2 /deploy/add_machine/deploy/ "$HOME/working/"
 
+# HARD-VERIFY the unpack produced the layout the rest of this script (and every
+# job command) needs.  Same reasoning as the msr-tools guard above: the workloads
+# build below runs under `set +e`, so a wrong deploy shape makes `pushd` fail,
+# setup.sh never run, and the host still finish "successfully" -- shipping a node
+# with no built workloads that only surfaces hours later when jobs land on it.
+# The usual cause is a deploy root carrying its own working/ layer, which nests
+# to ~/working/working/ instead of ~/working/.
+if [[ ! -f "$HOME/working/workloads/setup.sh" ]]; then
+    echo "============================================================" >&2
+    echo "FATAL [$(hostname -s)]: ~/working/workloads/setup.sh is missing after unpack." >&2
+    echo "  ~/working contains:" >&2
+    ls -1 "$HOME/working" 2>/dev/null | sed 's/^/    /' >&2
+    if [[ -d "$HOME/working/working/workloads" ]]; then
+        echo "  Found ~/working/working/workloads -- the deploy root was nested one" >&2
+        echo "  level too deep.  Point DEPLOY_DIR at the dir holding regent/+workloads/." >&2
+    fi
+    echo "  Aborting provisioning for this host rather than shipping it unbuilt." >&2
+    echo "============================================================" >&2
+    exit 1
+fi
+
 # Ensure a working base conda + dataVis env via the cluster's single source of
 # truth (the deployed miniconda ships without pip/archspec, which breaks EVERY
 # solve -- ensure_conda.sh repairs that, then builds+verifies dataVis).  Runs
