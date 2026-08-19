@@ -103,6 +103,29 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Validate the deploy root BEFORE the ~12 G rsync.  setup_hemem.sh unpacks this
+# dir into the worker's ~/working/, so it must hold regent/ + workloads/ at its
+# TOP level -- a root carrying its own working/ layer nests to ~/working/working/
+# and the remote guard aborts the host after the whole transfer has already run.
+# Same check setup_all_machines.sh does; this is the single-host path.
+if [[ -n "$DEPLOY" ]]; then
+    if [[ ! -d "$DEPLOY" ]]; then
+        echo "[ERROR] Deploy dir not found: $DEPLOY" >&2
+        exit 1
+    fi
+    for _need in regent workloads; do
+        if [[ ! -d "$DEPLOY/$_need" ]]; then
+            echo "[ERROR] Deploy dir has no '$_need/' at its top level: $DEPLOY" >&2
+            echo "        Expected $DEPLOY/{regent,workloads}. Found:" >&2
+            ls -1 "$DEPLOY" 2>/dev/null | sed 's/^/          /' >&2
+            if [[ -d "$DEPLOY/working/$_need" ]]; then
+                echo "        Looks like the root is one level up -- try -d $DEPLOY/working" >&2
+            fi
+            exit 1
+        fi
+    done
+fi
+
 # SSH and rsync setup
 DEFAULT_SSH_USER="${EXPJOBSERVER_SSH_USER:-$(whoami)}"
 DEFAULT_SSH_OPTIONS="${EXPJOBSERVER_SSH_OPTIONS:--o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR}"
