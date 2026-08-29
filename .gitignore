@@ -21,3 +21,5 @@ debug.txt
 debug_log.txt
 
 machine_list.txt
+
+__pycache__
